@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """
-三诺 iPOCT 仪器数据简单协议 - 帧分析与响应生成工具
+三诺 iPOCT 仪器数据简单协议 - 全面测试帧生成器
+已确认: CRC16-MODBUS, 帧格式: SN(2)+Length(2)+OpType(2)+Data(N)+CRC(2)
+
+分析:
+- P1-P5 (全部 POST + url/fhir JSON 变体) 均 E56-D
+- CRC16-MODBUS 已验证正确
+- 说明问题可能在: 操作类型不是POST, 或 JSON结构不是url/fhir格式, 或响应帧格式本身不同
 """
 import struct
 import json
 
 
 def crc16_modbus(data: bytes) -> int:
-    """CRC16-MODBUS: polynomial 0xA001, initial 0xFFFF"""
     crc = 0xFFFF
     for byte in data:
         crc ^= byte
@@ -20,275 +25,276 @@ def crc16_modbus(data: bytes) -> int:
 
 
 def build_frame(operation_type: int, data_content: bytes) -> bytes:
-    """构建完整的协议帧"""
+    """标准帧: SN + length + op_type + data + CRC"""
     op_bytes = struct.pack(">H", operation_type)
     crc_input = op_bytes + data_content
     crc = crc16_modbus(crc_input)
-    crc_bytes = struct.pack("<H", crc)  # 低字节在前
-    frame_length = len(op_bytes) + len(data_content) + len(crc_bytes)
+    crc_bytes = struct.pack("<H", crc)
+    frame_length = 2 + len(data_content) + 2  # op + data + crc
+    length_bytes = struct.pack(">H", frame_length)
+    return b'\x53\x4E' + length_bytes + op_bytes + data_content + crc_bytes
+
+
+def build_frame_no_optype(data_content: bytes) -> bytes:
+    """变体帧(无操作类型): SN + length + data + CRC"""
+    crc = crc16_modbus(data_content)
+    crc_bytes = struct.pack("<H", crc)
+    frame_length = len(data_content) + 2  # data + crc
+    length_bytes = struct.pack(">H", frame_length)
+    return b'\x53\x4E' + length_bytes + data_content + crc_bytes
+
+
+def build_frame_crc_all(operation_type: int, data_content: bytes) -> bytes:
+    """变体帧(CRC覆盖全部): SN + length + op + data + CRC, CRC计算包含header+length"""
+    op_bytes = struct.pack(">H", operation_type)
+    frame_length = 2 + len(data_content) + 2
     length_bytes = struct.pack(">H", frame_length)
     header = b'\x53\x4E'
+    crc_input = header + length_bytes + op_bytes + data_content
+    crc = crc16_modbus(crc_input)
+    crc_bytes = struct.pack("<H", crc)
     return header + length_bytes + op_bytes + data_content + crc_bytes
 
 
-def parse_frame(hex_str: str):
-    """解析一个协议帧"""
-    hex_clean = hex_str.replace(" ", "").replace("\n", "")
-    data = bytes.fromhex(hex_clean)
-
-    print(f"\n{'='*70}")
-    print(f"原始帧 ({len(data)} 字节)")
-    print(f"{'='*70}")
-
-    if len(data) < 8:
-        print("错误: 帧长度不足8字节")
-        return None
-
-    header = data[0:2]
-    if header != b'\x53\x4E':
-        print(f"错误: 帧头不正确! 期望 53 4E, 实际 {header.hex(' ').upper()}")
-        return None
-    print(f"  帧头: 53 4E ('SN') ✓")
-
-    frame_length = struct.unpack(">H", data[2:4])[0]
-    actual_payload = len(data) - 4
-    match_str = "✓" if actual_payload == frame_length else f"✗ 实际={actual_payload}"
-    print(f"  帧长度: 0x{data[2:4].hex().upper()} = {frame_length} {match_str}")
-
-    op_type = struct.unpack(">H", data[4:6])[0]
-    op_names = {0: "GET", 1: "POST/Create", 2: "PUT/Update", 3: "DELETE", 8: "心跳"}
-    print(f"  操作类型: 0x{data[4:6].hex().upper()} = {op_type} ({op_names.get(op_type, '未知')})")
-
-    crc_received = struct.unpack("<H", data[-2:])[0]
-    crc_scope = data[4:-2]
-    crc_calc = crc16_modbus(crc_scope)
-    crc_match = "✓" if crc_calc == crc_received else f"✗ 计算值=0x{crc_calc:04X}"
-    print(f"  CRC16-MODBUS: 0x{crc_received:04X} {crc_match}")
-
-    data_content = data[6:-2]
-    try:
-        json_str = data_content.decode('utf-8')
-        try:
-            parsed = json.loads(json_str)
-            print(f"  JSON: {json.dumps(parsed, ensure_ascii=False)}")
-        except json.JSONDecodeError:
-            print(f"  文本: {json_str}")
-    except UnicodeDecodeError:
-        print(f"  HEX: {data_content.hex(' ').upper()}")
-
-    return {
-        "op_type": op_type,
-        "data_content": data_content,
-        "crc_ok": crc_calc == crc_received,
-    }
+def fmt(frame: bytes) -> str:
+    return frame.hex(' ').upper()
 
 
-def generate_frame(op_type: int, json_data: dict, label: str):
-    """生成帧并输出可复制的HEX字符串"""
-    json_str = json.dumps(json_data, ensure_ascii=False, separators=(',', ':'))
-    data_bytes = json_str.encode('utf-8')
-    frame = build_frame(op_type, data_bytes)
+def print_frame(label: str, frame: bytes, json_str: str = ""):
+    print(f"\n  [{label}]")
+    if json_str:
+        print(f"  数据: {json_str}")
+    print(f"  长度: {len(frame)}字节")
+    print(f"  HEX: {fmt(frame)}")
 
-    op_names = {0: "GET", 1: "POST", 2: "PUT", 3: "DELETE"}
-    print(f"\n{'─'*70}")
-    print(f"  方案 {label}")
-    print(f"  操作类型: {op_type} ({op_names.get(op_type, '?')})")
-    print(f"  JSON: {json_str}")
-    print(f"  帧长: {len(frame)} 字节")
-    print(f"  ▼ 复制以下HEX到NetAssist发送框 ▼")
-    print(f"  {frame.hex(' ').upper()}")
+
+def gen(op: int, data: dict, label: str):
+    """生成标准帧并打印"""
+    js = json.dumps(data, ensure_ascii=False, separators=(',', ':'))
+    frame = build_frame(op, js.encode('utf-8'))
+    print_frame(label, frame, js)
+    return frame
+
+
+def gen_raw(op: int, raw_bytes: bytes, label: str, desc: str = ""):
+    """用原始字节生成帧"""
+    frame = build_frame(op, raw_bytes)
+    print_frame(label, frame, desc or repr(raw_bytes))
     return frame
 
 
 if __name__ == "__main__":
-    print("=" * 70)
-    print("  三诺 iPOCT 简单协议 - 服务器响应帧生成工具")
-    print("  CRC算法: CRC16-MODBUS (已验证)")
-    print("=" * 70)
+    OP_GET = 0
+    OP_POST = 1
+    OP_PUT = 2
+    OP_DEL = 3
 
-    # ── 验证CRC算法 ──────────────────────────────────────────
-    print("\n\n▶ 验证CRC16算法（使用第二次发送的帧，此帧CRC已知正确）")
-    parse_frame(
-        "53 4E 00 C3 00 01 7B 22 66 68 69 72 22 3A 7B 22 "
-        "55 73 65 72 49 64 22 3A 22 22 2C 22 61 67 65 22 "
-        "3A 22 37 30 22 2C 22 61 67 65 4D 6F 6E 74 68 22 "
-        "3A 22 30 22 2C 22 64 65 70 61 72 74 6D 65 6E 74 "
-        "22 3A 22 22 2C 22 65 78 74 65 6E 73 69 6F 6E 22 "
-        "3A 7B 22 70 6F 73 69 74 69 6F 6E 22 3A 22 31 22 "
-        "7D 2C 22 67 65 6E 64 65 72 22 3A 31 2C 22 6D 65 "
-        "64 69 63 61 6C 52 65 63 6F 72 64 4E 6F 22 3A 22 "
-        "22 2C 22 6E 61 6D 65 22 3A 22 E5 BC A0 E4 B8 89 "
-        "22 2C 22 69 64 22 3A 22 31 22 7D 2C 22 75 72 6C "
-        "22 3A 22 68 74 74 70 73 3A 2F 2F 65 78 61 6D 70 "
-        "6C 65 2E 63 6F 6D 2F 70 61 74 68 2F 50 61 74 69 "
-        "65 6E 74 22 7D DD 7A"
-    )
+    PAT = "https://example.com/path/Patient"
+    OBS = "https://example.com/path/Observation"
 
-    print("\n\n▶ 验证第一次发送的帧（此帧CRC可能有误）")
-    result = parse_frame(
-        "53 4E 00 40 00 01 7B 22 66 68 69 72 22 3A 7B 22 "
-        "69 64 22 3A 22 31 22 7D 2C 22 75 72 6C 22 3A 22 "
-        "68 74 74 70 73 3A 2F 2F 65 78 61 6D 70 6C 65 2E "
-        "63 6F 6D 2F 70 61 74 68 2F 50 61 74 69 65 6E 74 "
-        "22 7D FD 8A"
-    )
+    print("=" * 72)
+    print("  三诺 iPOCT 协议 - 全面排查响应帧生成器")
+    print("  已知: CRC16-MODBUS ✓, POST+url/fhir 全部 E56-D")
+    print("=" * 72)
 
-    # ── 关键分析 ──────────────────────────────────────────────
-    print("\n\n" + "=" * 70)
-    print("▶ 关键分析")
-    print("=" * 70)
+    # =========================================================================
+    print("\n\n" + "█" * 72)
+    print("  第1组: PUT (0x02) 操作类型 - 最高优先级")
+    print("  理由: POST是仪器→服务器, PUT可能是服务器→仪器的确认")
+    print("█" * 72)
+
+    gen(OP_PUT, {"fhir":{"id":"1"},"url":PAT}, "PUT-1: fhir{id}+url")
+    gen(OP_PUT, {"url":PAT,"fhir":{"id":"1"}}, "PUT-2: url+fhir{id}")
+    gen(OP_PUT, {"url":PAT,"fhir":{}}, "PUT-3: url+fhir{}")
+    gen(OP_PUT, {"url":PAT}, "PUT-4: 仅url")
+    gen(OP_PUT, {"fhir":{}}, "PUT-5: 仅fhir{}")
+
+    # =========================================================================
+    print("\n\n" + "█" * 72)
+    print("  第2组: GET (0x00) 操作类型")
+    print("  理由: GET可能表示'数据已获取/确认收到'")
+    print("█" * 72)
+
+    gen(OP_GET, {"fhir":{"id":"1"},"url":PAT}, "GET-1: fhir{id}+url")
+    gen(OP_GET, {"url":PAT,"fhir":{}}, "GET-2: url+fhir{}")
+    gen(OP_GET, {"url":PAT}, "GET-3: 仅url")
+    gen(OP_GET, {}, "GET-4: 空JSON{}")
+
+    # =========================================================================
+    print("\n\n" + "█" * 72)
+    print("  第3组: 空数据帧 (无JSON内容, 只有op_type+CRC)")
+    print("  理由: 最简ACK,某些协议响应只需要帧头确认即可")
+    print("█" * 72)
+
+    for op_name, op_val in [("POST", 1), ("PUT", 2), ("GET", 0), ("DELETE", 3)]:
+        frame = build_frame(op_val, b'')
+        print_frame(f"EMPTY-{op_name}: 操作类型={op_val},无数据内容", frame, "(空)")
+
+    # =========================================================================
+    print("\n\n" + "█" * 72)
+    print("  第4组: 非标准操作类型")
+    print("  理由: 心跳用0x08,可能存在其他未文档化的操作码")
+    print("█" * 72)
+
+    for op_val in [4, 5, 6, 7, 8, 9, 10, 0x0A, 0x0B, 0x0C, 0x10, 0xFF]:
+        if op_val in (0x0A, 0x0B, 0x0C) and op_val in (10,):
+            continue
+        js_data = {"fhir":{"id":"1"},"url":PAT}
+        js = json.dumps(js_data, ensure_ascii=False, separators=(',', ':'))
+        frame = build_frame(op_val, js.encode('utf-8'))
+        print_frame(f"OP-{op_val:02X}: 操作类型=0x{op_val:04X}", frame, js)
+
+    # =========================================================================
+    print("\n\n" + "█" * 72)
+    print("  第5组: 不同JSON结构(非url/fhir格式)")
+    print("  理由: 服务器响应可能使用完全不同的JSON字段")
+    print("█" * 72)
+
+    # 使用code/status/result等字段
+    gen(OP_POST, {"code":0}, "JSON-1: POST+{code:0}")
+    gen(OP_POST, {"code":200}, "JSON-2: POST+{code:200}")
+    gen(OP_POST, {"code":"200"}, "JSON-3: POST+{code:'200'}")
+    gen(OP_POST, {"result":0}, "JSON-4: POST+{result:0}")
+    gen(OP_POST, {"result":"ok"}, "JSON-5: POST+{result:'ok'}")
+    gen(OP_POST, {"status":0}, "JSON-6: POST+{status:0}")
+    gen(OP_POST, {"status":"ok"}, "JSON-7: POST+{status:'ok'}")
+    gen(OP_POST, {"success":True}, "JSON-8: POST+{success:true}")
+    gen(OP_POST, {}, "JSON-9: POST+空JSON{}")
+    gen(OP_PUT, {"code":0}, "JSON-10: PUT+{code:0}")
+    gen(OP_PUT, {"result":0}, "JSON-11: PUT+{result:0}")
+    gen(OP_PUT, {"status":0}, "JSON-12: PUT+{status:0}")
+    gen(OP_GET, {"code":0}, "JSON-13: GET+{code:0}")
+
+    # 带parameters字段(协议文档提到parameters是可选的操作参数)
+    gen(OP_POST, {"url":PAT,"parameters":{"status":0}}, "JSON-14: POST+url+parameters")
+    gen(OP_POST, {"url":PAT,"parameters":{},"fhir":{}}, "JSON-15: POST+url+parameters+fhir")
+
+    # FHIR OperationOutcome模式
+    gen(OP_POST, {"url":PAT,"fhir":{"resourceType":"OperationOutcome","issue":[{"severity":"information","code":"informational"}]}},
+        "JSON-16: POST+FHIR OperationOutcome")
+
+    # 带extension字段
+    gen(OP_POST, {"url":PAT,"fhir":{},"extension":{"position":"1"}},
+        "JSON-17: POST+url+fhir+extension{position}")
+
+    # URL末尾加ID (FHIR模式: POST /Patient → Response Location /Patient/1)
+    gen(OP_POST, {"fhir":{"id":"1"},"url":PAT+"/1"}, "JSON-18: POST+url含ID(/Patient/1)")
+
+    # =========================================================================
+    print("\n\n" + "█" * 72)
+    print("  第6组: JSON带空格格式(非紧凑)")
+    print("  理由: 仪器可能对JSON格式敏感,期望标准格式带空格")
+    print("█" * 72)
+
+    # Python json.dumps默认有空格: {"key": "value"}
+    for sep_name, seps in [("标准", (', ', ': ')), ("冒号后空格", (',', ': '))]:
+        data = {"fhir": {"id": "1"}, "url": PAT}
+        js = json.dumps(data, ensure_ascii=False, separators=seps)
+        frame = build_frame(OP_POST, js.encode('utf-8'))
+        print_frame(f"FMT-POST-{sep_name}: POST", frame, js)
+
+        frame2 = build_frame(OP_PUT, js.encode('utf-8'))
+        print_frame(f"FMT-PUT-{sep_name}: PUT", frame2, js)
+
+    # =========================================================================
+    print("\n\n" + "█" * 72)
+    print("  第7组: 原始字节/特殊响应")
+    print("  理由: 某些协议用单个字节或简单字符串应答")
+    print("█" * 72)
+
+    gen_raw(OP_POST, b'OK', "RAW-1: POST+'OK'", "OK")
+    gen_raw(OP_POST, b'ok', "RAW-2: POST+'ok'", "ok")
+    gen_raw(OP_POST, b'ACK', "RAW-3: POST+'ACK'", "ACK")
+    gen_raw(OP_POST, b'0', "RAW-4: POST+'0'", "0")
+    gen_raw(OP_POST, b'1', "RAW-5: POST+'1'", "1")
+    gen_raw(OP_POST, b'200', "RAW-6: POST+'200'", "200")
+    gen_raw(OP_POST, b'\x00', "RAW-7: POST+0x00", "单字节0x00")
+    gen_raw(OP_POST, b'\x06', "RAW-8: POST+ACK(0x06)", "ACK控制字符0x06")
+    gen_raw(OP_PUT, b'OK', "RAW-9: PUT+'OK'", "OK")
+    gen_raw(OP_GET, b'OK', "RAW-10: GET+'OK'", "OK")
+
+    # =========================================================================
+    print("\n\n" + "█" * 72)
+    print("  第8组: 不同CRC计算范围(如CRC覆盖整个帧)")
+    print("  理由: 服务器响应的CRC计算范围可能与仪器发送不同")
+    print("█" * 72)
+
+    js_data = {"fhir":{"id":"1"},"url":PAT}
+    js = json.dumps(js_data, ensure_ascii=False, separators=(',', ':'))
+    js_bytes = js.encode('utf-8')
+
+    frame_alt = build_frame_crc_all(OP_POST, js_bytes)
+    print_frame("CRC-ALT-1: POST, CRC覆盖SN+length+op+data", frame_alt, js)
+
+    frame_alt2 = build_frame_crc_all(OP_PUT, js_bytes)
+    print_frame("CRC-ALT-2: PUT, CRC覆盖SN+length+op+data", frame_alt2, js)
+
+    # CRC只覆盖data(不含op_type)
+    crc_data_only = crc16_modbus(js_bytes)
+    op_bytes = struct.pack(">H", OP_POST)
+    crc_bytes = struct.pack("<H", crc_data_only)
+    frame_length = 2 + len(js_bytes) + 2
+    length_bytes = struct.pack(">H", frame_length)
+    frame_alt3 = b'\x53\x4E' + length_bytes + op_bytes + js_bytes + crc_bytes
+    print_frame("CRC-ALT-3: POST, CRC仅覆盖data(不含op)", frame_alt3, js)
+
+    # =========================================================================
+    print("\n\n" + "█" * 72)
+    print("  第9组: 无SN帧头的原始响应")
+    print("  理由: 服务器响应可能不需要帧包装")
+    print("█" * 72)
+
+    raw_responses = [
+        (b'\x06', "ACK字符(0x06)"),
+        (b'\x15', "NAK字符(0x15)"),
+        (b'OK\r\n', "OK+回车换行"),
+        (b'{"code":0}', "纯JSON {code:0}"),
+        (b'{"result":0}', "纯JSON {result:0}"),
+        (b'{"status":"ok"}', "纯JSON {status:ok}"),
+        (json.dumps({"fhir":{"id":"1"},"url":PAT}, separators=(',',':')).encode(), "纯JSON fhir+url(无帧头)"),
+    ]
+    for raw, desc in raw_responses:
+        print(f"\n  [NOFRAME-{desc}]")
+        print(f"  HEX: {raw.hex(' ').upper()}")
+        print(f"  ASCII: {raw.decode('utf-8', errors='replace')}")
+
+    # =========================================================================
+    print("\n\n" + "█" * 72)
+    print("  第10组: POST + 与Observation URL的响应 ")
+    print("  理由: 也许服务器回复时应告知仪器接下来发往哪个URL")
+    print("█" * 72)
+
+    gen(OP_POST, {"url":OBS,"fhir":{}}, "OBS-1: POST+Observation url+fhir{}")
+    gen(OP_POST, {"url":OBS,"fhir":{"id":"1"}}, "OBS-2: POST+Observation url+fhir{id}")
+    gen(OP_GET, {"url":OBS,"fhir":{}}, "OBS-3: GET+Observation url+fhir{}")
+
+    # =========================================================================
+    print("\n\n" + "=" * 72)
+    print("  排查优先级建议")
+    print("=" * 72)
     print("""
-问题现象:
-  - 第一次发送: CRC 错误 → 仪器可能当做新请求处理
-  - 第二次发送: CRC 正确(MODBUS)，但回显了全部病人数据 → E56-D
+已排除: POST(0x01) + url/fhir JSON变体 → 全部 E56-D
 
-结论:
-  1. CRC 算法 = CRC16-MODBUS ✓（已验证）
-  2. 第二次 CRC 正确但仍然 E56-D → 说明 JSON 数据内容有问题
-  3. 回显全部病人数据显然不是仪器期望的响应格式
-  4. 需要确定正确的响应 JSON 结构
+优先尝试顺序:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. 第1组 PUT (PUT-1 ~ PUT-5) → 不同操作类型
+2. 第2组 GET (GET-1 ~ GET-4) → 不同操作类型
+3. 第3组 空数据帧 (EMPTY-POST/PUT/GET) → 最简ACK
+4. 第5组 不同JSON (JSON-1 ~ JSON-13) → 不同字段名
+5. 第6组 带空格JSON (FMT-*) → 格式差异
+6. 第9组 无帧头响应 (NOFRAME-*) → 完全不同的响应模式
+7. 第4组 非标操作类型 (OP-04 ~ OP-FF) → 隐藏操作码
+8. 第7组 原始字节 (RAW-*) → 特殊编码
+9. 第8组 不同CRC范围 (CRC-ALT-*) → CRC计算方式不同
 
-通信流程:
-  ┌─────────┐                    ┌──────────┐
-  │  仪 器   │                    │  服务器   │
-  └────┬────┘                    └────┬─────┘
-       │  1. POST Patient 病人信息    │
-       │ ──────────────────────────> │
-       │                             │
-       │  2. 服务器确认应答           │
-       │ <────────────────────────── │  ← 当前问题!
-       │                             │
-       │  3. POST Observation 检测结果│
-       │ ──────────────────────────> │
-       │                             │
-       │  4. 服务器确认应答           │
-       │ <────────────────────────── │
-       │                             │
-""")
+提示:
+- 在NetAssist中必须选择HEX发送模式
+- 第9组(无帧头)的数据可直接粘贴到发送框
+- 每次测试一个方案, 记录仪器反应(E56-D/其他错误/成功)
+- 如果某个操作类型不再报E56-D而报其他错误, 说明操作类型对了
 
-    # ── 生成候选响应帧 ─────────────────────────────────────────
-    PATIENT_URL = "https://example.com/path/Patient"
-    OBS_URL = "https://example.com/path/Observation"
-
-    print("=" * 70)
-    print("▶ 服务器对 Patient POST 的响应候选方案")
-    print("  优先级从高到低排列，建议按顺序尝试")
-    print("=" * 70)
-
-    # 最可能的方案 - fhir在前(与仪器发送格式一致) + POST
-    generate_frame(1, {
-        "fhir": {"id": "1"},
-        "url": PATIENT_URL,
-    }, "★ P1 (推荐首试): POST + fhir{id} + url（fhir在前）")
-
-    # url在前
-    generate_frame(1, {
-        "url": PATIENT_URL,
-        "fhir": {"id": "1"},
-    }, "P2: POST + url + fhir{id}（url在前）")
-
-    # 空fhir
-    generate_frame(1, {
-        "fhir": {},
-        "url": PATIENT_URL,
-    }, "P3: POST + fhir{} + url")
-
-    generate_frame(1, {
-        "url": PATIENT_URL,
-        "fhir": {},
-    }, "P4: POST + url + fhir{}")
-
-    # 仅url
-    generate_frame(1, {
-        "url": PATIENT_URL,
-    }, "P5: POST + 仅url")
-
-    # fhir在前 + 仅url
-    generate_frame(1, {
-        "fhir": {},
-    }, "P6: POST + 仅fhir{}")
-
-    # 带 status
-    generate_frame(1, {
-        "fhir": {"id": "1", "status": 0},
-        "url": PATIENT_URL,
-    }, "P7: POST + fhir{id,status} + url")
-
-    print("\n\n" + "─" * 70)
-    print("  ── 备选: 尝试 PUT 操作类型（表示确认/更新）──")
-    print("─" * 70)
-
-    generate_frame(2, {
-        "fhir": {"id": "1"},
-        "url": PATIENT_URL,
-    }, "U1: PUT + fhir{id} + url")
-
-    generate_frame(2, {
-        "url": PATIENT_URL,
-        "fhir": {},
-    }, "U2: PUT + url + fhir{}")
-
-    print("\n\n" + "─" * 70)
-    print("  ── 备选: 尝试 GET 操作类型 ──")
-    print("─" * 70)
-
-    generate_frame(0, {
-        "fhir": {"id": "1"},
-        "url": PATIENT_URL,
-    }, "G1: GET + fhir{id} + url")
-
-    generate_frame(0, {
-        "url": PATIENT_URL,
-        "fhir": {},
-    }, "G2: GET + url + fhir{}")
-
-    # ── Observation 响应 ──
-    print("\n\n" + "=" * 70)
-    print("▶ 服务器对 Observation POST 的响应候选方案")
-    print("  （当 Patient 响应成功后，仪器会发送检测结果）")
-    print("=" * 70)
-
-    generate_frame(1, {
-        "fhir": {"id": "1"},
-        "url": OBS_URL,
-    }, "O1: POST + fhir{id} + url(Observation)")
-
-    generate_frame(1, {
-        "url": OBS_URL,
-        "fhir": {},
-    }, "O2: POST + url(Observation) + fhir{}")
-
-    generate_frame(1, {
-        "url": OBS_URL,
-    }, "O3: POST + 仅url(Observation)")
-
-    # ── 使用说明 ──
-    print("\n\n" + "=" * 70)
-    print("▶ NetAssist 测试步骤")
-    print("=" * 70)
-    print("""
-1. NetAssist 设置:
-   - 协议类型: TCP Server
-   - 端口: 9000
-   - 发送设置: 选择 HEX 模式
-   - 勾选"转义符指令解析"
-
-2. 测试步骤:
-   a) 等待仪器连接（会先发心跳 {"id":""}）
-   b) 仪器点击"上传"后，会发送 Patient 病人信息
-   c) 收到 Patient 数据后，立即将对应方案的HEX复制到发送框并发送
-      - 先试 P1，如果仍 E56-D 则换 P2，依次尝试
-   d) 如果响应正确，仪器应该继续发送 Observation 检测结果数据
-   e) 收到 Observation 后，发送对应的 O1/O2/O3 响应
-
-3. 判断响应是否成功:
-   - 成功: 仪器不报错，并继续发送检测结果(Observation)
-   - E56-D: 数据格式错误，换下一个方案
-   - E59-D: 超时未回复，动作要更快
-   - E55-D: 通讯线路忙，等几秒再试
-
-4. 注意事项:
-   - 必须用 HEX 模式发送!（选中发送区左侧的 HEX 单选框）
-   - 超时约在几秒内，收到数据后要尽快回复
-   - 如果 P1-P7 全部 E56-D，尝试 U1-U2 和 G1-G2
+特别注意:
+- 如果 EMPTY-POST 不报 E56-D → 操作类型对, 只需要调整数据内容
+- 如果 PUT/GET 某个不报 E56-D → 操作类型找到了
+- 如果全部都 E56-D → 可能响应帧格式本身就不一样
 """)
