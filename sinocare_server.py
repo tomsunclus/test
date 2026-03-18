@@ -216,7 +216,7 @@ def handle(conn, addr, mode):
                     continue
 
                 rts = time.strftime("%H:%M:%S")
-                print(f"\n[{rts}] ▶ 发送 [模式{actual_mode}: {desc}]")
+                print(f"\n[{rts}] ▶ 发送 [{desc}]")
                 print(hexd(resp))
 
                 try:
