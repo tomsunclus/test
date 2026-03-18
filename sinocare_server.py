@@ -27,10 +27,10 @@ def crc16_modbus(data):
 
 
 def build(op, data):
-    """构建响应帧: SN + len + op + data + CRC(低字节在前,仪器接收端验证)"""
+    """构建响应帧: SN + len + op + data + CRC(高字节在前,与真实服务器一致)"""
     ob = struct.pack(">H", op)
     crc = crc16_modbus(ob + data)
-    cb = struct.pack("<H", crc)  # 低字节在前 (仪器接收端验证用低字节在前)
+    cb = struct.pack(">H", crc)  # 高字节在前 (真实服务器抓包验证)
     fl = struct.pack(">H", 2 + len(data) + 2)
     return b'\x53\x4E' + fl + ob + data + cb
 
@@ -72,102 +72,43 @@ def hexd(d, pfx="    "):
     return '\n'.join(lines)
 
 
-def respond(mode, parsed, frame_type):
-    """frame_type: 'device', 'patient', 'observation', 'other'"""
-    url = ""
-    if parsed["jo"]:
-        url = parsed["jo"].get("url", "")
+OP_CREATED = 0x00C9   # 201 = HTTP Created (真实服务器抓包确认)
+OP_OBS_OK = 0x025E    # 606 = Observation响应码 (真实服务器抓包确认)
+id_counter = [1000]   # 自增ID
 
+def respond(mode, parsed, frame_type):
+    """根据真实服务器抓包结果生成正确响应"""
     if mode == 0:
         return "(静默)", b''
 
-    desc_prefix = f"{frame_type}响应"
+    # 根据帧类型确定resourceType和操作码
+    resource_map = {
+        "device": ("Device", OP_CREATED),
+        "patient": ("Patient", OP_CREATED),
+        "observation": ("Observation", OP_OBS_OK),
+        "qc": ("Observation", OP_OBS_OK),
+        "unknown": ("Resource", OP_CREATED),
+    }
 
-    if mode == 1:  # 回显(用低字节CRC重新构建)
-        return f"{desc_prefix}: POST+原始数据(低CRC)", build(1, parsed["data"])
-    elif mode == 2:  # PUT + 同数据
-        return f"{desc_prefix}: PUT+同数据", build(2, parsed["data"])
-    elif mode == 3:  # GET + 同数据
-        return f"{desc_prefix}: GET+同数据", build(0, parsed["data"])
-    elif mode == 4:  # POST + {fhir:{id:1},url}
-        d = json.dumps({"fhir":{"id":"1"},"url":url}, separators=(',',':')).encode()
-        return f"{desc_prefix}: POST+fhir{{id}}+url", build(1, d)
-    elif mode == 5:  # PUT + {fhir:{id:1},url}
-        d = json.dumps({"fhir":{"id":"1"},"url":url}, separators=(',',':')).encode()
-        return f"{desc_prefix}: PUT+fhir{{id}}+url", build(2, d)
-    elif mode == 6:  # POST + {url,fhir:{}}
-        d = json.dumps({"url":url,"fhir":{}}, separators=(',',':')).encode()
-        return f"{desc_prefix}: POST+url+fhir{{}}", build(1, d)
-    elif mode == 7:  # POST + {url}
-        d = json.dumps({"url":url}, separators=(',',':')).encode()
-        return f"{desc_prefix}: POST+url", build(1, d)
-    elif mode == 8:  # POST + {}
-        return f"{desc_prefix}: POST+{{}}", build(1, b'{}')
-    elif mode == 9:  # POST 空
-        return f"{desc_prefix}: POST空数据", build(1, b'')
-    elif mode == 10:  # POST+{code:0}
-        return f"{desc_prefix}: POST+code:0", build(1, b'{"code":0}')
-    elif mode == 11:  # POST+{status:0}
-        return f"{desc_prefix}: POST+status:0", build(1, b'{"status":0}')
-    elif mode == 12:  # POST + 带空格
-        d = json.dumps({"fhir": {"id": "1"}, "url": url}).encode()
-        return f"{desc_prefix}: POST+带空格JSON", build(1, d)
-    elif mode == 13:  # POST + {id:""}  (像心跳格式)
-        return f"{desc_prefix}: POST+id空", build(1, b'{"id":""}')
-    elif mode == 14:  # POST + {id:"1"}
-        return f"{desc_prefix}: POST+id:1", build(1, b'{"id":"1"}')
-    elif mode == 15:  # POST + {result:"ok"}
-        return f"{desc_prefix}: POST+result:ok", build(1, b'{"result":"ok"}')
-    elif mode == 16:  # POST + {fhir:{id:"1"},url} 用Observation URL!
-        obs_url = url.replace("/Patient", "/Observation").replace("/Device", "/Observation")
-        d = json.dumps({"fhir":{"id":"1"},"url":obs_url}, separators=(',',':')).encode()
-        return f"{desc_prefix}: POST+Observation url", build(1, d)
-    elif mode == 17:  # 不同操作类型 0x0004
-        d = json.dumps({"fhir":{"id":"1"},"url":url}, separators=(',',':')).encode()
-        return f"{desc_prefix}: OP=0x04+fhir{{id}}+url", build(4, d)
-    elif mode == 18:  # 不同操作类型 0x0005
-        d = json.dumps({"fhir":{"id":"1"},"url":url}, separators=(',',':')).encode()
-        return f"{desc_prefix}: OP=0x05+fhir{{id}}+url", build(5, d)
-    elif mode == 19:  # 不同操作类型 0x0008 (心跳类型)
-        d = json.dumps({"fhir":{"id":"1"},"url":url}, separators=(',',':')).encode()
-        return f"{desc_prefix}: OP=0x08+fhir{{id}}+url", build(8, d)
-    elif mode == 20:  # POST + {fhir:{status:0},url}
-        d = json.dumps({"fhir":{"status":0},"url":url}, separators=(',',':')).encode()
-        return f"{desc_prefix}: POST+fhir{{status:0}}", build(1, d)
-    elif mode == 21:  # POST + {fhir:{id:"1",status:"1"},url}
-        d = json.dumps({"fhir":{"id":"1","status":"1"},"url":url}, separators=(',',':')).encode()
-        return f"{desc_prefix}: POST+fhir{{id,status:1}}", build(1, d)
-    elif mode == 22:  # DELETE + {fhir:{id:1},url}
-        d = json.dumps({"fhir":{"id":"1"},"url":url}, separators=(',',':')).encode()
-        return f"{desc_prefix}: DELETE+fhir{{id}}+url", build(3, d)
-    elif mode == 23:  # POST + {fhir:{extension:{position:"1"}},url}
-        d = json.dumps({"fhir":{"extension":{"position":"1"}},"url":url}, separators=(',',':')).encode()
-        return f"{desc_prefix}: POST+extension+url", build(1, d)
-    elif mode == 24:  # POST + {url,parameters:{},fhir:{}}
-        d = json.dumps({"url":url,"parameters":{},"fhir":{}}, separators=(',',':')).encode()
-        return f"{desc_prefix}: POST+url+params+fhir", build(1, d)
-    elif mode == 25:  # POST + {fhir:{id:"1",medicalRecordNo:""},url}
-        d = json.dumps({"fhir":{"id":"1","medicalRecordNo":""},"url":url}, separators=(',',':')).encode()
-        return f"{desc_prefix}: POST+fhir{{id,mrn}}", build(1, d)
-    elif mode == 26:  # GET + {fhir:{id:"1"},url}
-        d = json.dumps({"fhir":{"id":"1"},"url":url}, separators=(',',':')).encode()
-        return f"{desc_prefix}: GET+fhir{{id}}+url", build(0, d)
-    elif mode == 27:  # POST + url在前 + fhir{id:"1",status:"1"}
-        d = json.dumps({"url":url,"fhir":{"id":"1","status":"1"}}, separators=(',',':')).encode()
-        return f"{desc_prefix}: POST+url先+fhir{{id,s}}", build(1, d)
-    elif mode == 28:  # POST + 只有fhir(无url)
-        d = json.dumps({"fhir":{"id":"1"}}, separators=(',',':')).encode()
-        return f"{desc_prefix}: POST+仅fhir{{id}}", build(1, d)
-    elif mode == 29:  # POST + {accepted:true}
-        return f"{desc_prefix}: POST+accepted:true", build(1, b'{"accepted":true}')
-    elif mode == 30:  # POST + HTTP-like {code:201,message:"Created"}
-        d = b'{"code":201,"message":"Created"}'
-        return f"{desc_prefix}: POST+code:201", build(1, d)
+    # Communication帧(仪器上报错误日志)
+    url = ""
+    if parsed["jo"]:
+        url = parsed["jo"].get("url", "")
+    if "/Communication" in url:
+        resource_type = "Communication"
+        op_code = OP_CREATED
     else:
-        return "(无)", b''
+        resource_type, op_code = resource_map.get(frame_type, ("Resource", OP_CREATED))
+
+    id_counter[0] += 1
+    d = json.dumps({"id": str(id_counter[0]), "resourceType": resource_type},
+                   separators=(',', ':')).encode()
+
+    desc = f"OP=0x{op_code:04X} {{id:{id_counter[0]},resourceType:{resource_type}}}"
+    return desc, build(op_code, d)
 
 
-MAX_MODE = 30
+MAX_MODE = 1  # 只有一种模式了(正确模式)
 
 
 auto_counter = [0]  # 全局计数器，跨连接持续递增
@@ -182,6 +123,14 @@ def handle(conn, addr, mode):
     conn.settimeout(300)
     buf = b''
     n = 0
+
+    # 发送欢迎消息(真实服务器也会发)
+    try:
+        welcome = b"Welcome to LIS service!\n"
+        conn.sendall(welcome)
+        print(f"[{ts}] ▶ 发送欢迎消息")
+    except:
+        pass
 
     try:
         while True:
@@ -255,21 +204,12 @@ def handle(conn, addr, mode):
                 print(hexd(p["raw"]))
                 print(f"    {'━'*60}")
 
-                # 决定响应
+                # 发送响应(使用从真实服务器抓包得到的正确格式)
                 if mode == 0:
                     print(f"    [静默: 不回复]")
                     continue
 
-                actual_mode = mode
-                if mode == 99:
-                    if frame_type == "device":
-                        actual_mode = 4  # Device固定用POST+{fhir:{id},url}
-                    else:
-                        auto_counter[0] = (auto_counter[0] % MAX_MODE) + 1
-                        actual_mode = auto_counter[0]
-                        print(f"    ▷ Patient/Observation 轮换模式: {actual_mode}/{MAX_MODE}")
-
-                desc, resp = respond(actual_mode, p, frame_type)
+                desc, resp = respond(1, p, frame_type)
 
                 if not resp:
                     print(f"    [{desc}]")
