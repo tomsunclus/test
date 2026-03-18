@@ -29,7 +29,7 @@ def build_frame(operation_type: int, data_content: bytes) -> bytes:
     op_bytes = struct.pack(">H", operation_type)
     crc_input = op_bytes + data_content
     crc = crc16_modbus(crc_input)
-    crc_bytes = struct.pack("<H", crc)
+    crc_bytes = struct.pack(">H", crc)  # 高字节在前(仪器实际big-endian)
     frame_length = 2 + len(data_content) + 2  # op + data + crc
     length_bytes = struct.pack(">H", frame_length)
     return b'\x53\x4E' + length_bytes + op_bytes + data_content + crc_bytes
@@ -38,7 +38,7 @@ def build_frame(operation_type: int, data_content: bytes) -> bytes:
 def build_frame_no_optype(data_content: bytes) -> bytes:
     """变体帧(无操作类型): SN + length + data + CRC"""
     crc = crc16_modbus(data_content)
-    crc_bytes = struct.pack("<H", crc)
+    crc_bytes = struct.pack(">H", crc)  # 高字节在前
     frame_length = len(data_content) + 2  # data + crc
     length_bytes = struct.pack(">H", frame_length)
     return b'\x53\x4E' + length_bytes + data_content + crc_bytes
@@ -52,7 +52,7 @@ def build_frame_crc_all(operation_type: int, data_content: bytes) -> bytes:
     header = b'\x53\x4E'
     crc_input = header + length_bytes + op_bytes + data_content
     crc = crc16_modbus(crc_input)
-    crc_bytes = struct.pack("<H", crc)
+    crc_bytes = struct.pack(">H", crc)  # 高字节在前
     return header + length_bytes + op_bytes + data_content + crc_bytes
 
 
@@ -232,7 +232,7 @@ if __name__ == "__main__":
     # CRC只覆盖data(不含op_type)
     crc_data_only = crc16_modbus(js_bytes)
     op_bytes = struct.pack(">H", OP_POST)
-    crc_bytes = struct.pack("<H", crc_data_only)
+    crc_bytes = struct.pack(">H", crc_data_only)  # 高字节在前
     frame_length = 2 + len(js_bytes) + 2
     length_bytes = struct.pack(">H", frame_length)
     frame_alt3 = b'\x53\x4E' + length_bytes + op_bytes + js_bytes + crc_bytes
