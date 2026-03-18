@@ -119,17 +119,18 @@ def respond(mode, parsed, frame_type):
 MAX_MODE = 12
 
 
+auto_counter = [0]  # 全局计数器，跨连接持续递增
+
 def handle(conn, addr, mode):
     ts = time.strftime("%H:%M:%S")
     print(f"\n{'='*72}")
     print(f"[{ts}] 仪器连接: {addr[0]}:{addr[1]}")
-    print(f"[{ts}] 模式: {mode}")
+    print(f"[{ts}] 模式: {mode}, 当前Patient轮换计数: {auto_counter[0]}")
     print(f"{'='*72}")
 
     conn.settimeout(300)
     buf = b''
     n = 0
-    auto_mode = 1
 
     try:
         while True:
@@ -210,8 +211,12 @@ def handle(conn, addr, mode):
 
                 actual_mode = mode
                 if mode == 99:
-                    actual_mode = auto_mode
-                    auto_mode = (auto_mode % MAX_MODE) + 1
+                    if frame_type == "device":
+                        actual_mode = 4  # Device固定用POST+{fhir:{id},url}
+                    else:
+                        auto_counter[0] = (auto_counter[0] % MAX_MODE) + 1
+                        actual_mode = auto_counter[0]
+                        print(f"    ▷ Patient/Observation 轮换模式: {actual_mode}/{MAX_MODE}")
 
                 desc, resp = respond(actual_mode, p, frame_type)
 
