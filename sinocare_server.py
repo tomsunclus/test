@@ -27,10 +27,10 @@ def crc16_modbus(data):
 
 
 def build(op, data):
-    """构建帧: SN + len + op + data + CRC(高字节在前)"""
+    """构建响应帧: SN + len + op + data + CRC(低字节在前,仪器接收端验证)"""
     ob = struct.pack(">H", op)
     crc = crc16_modbus(ob + data)
-    cb = struct.pack(">H", crc)  # 高字节在前 (仪器实际使用)
+    cb = struct.pack("<H", crc)  # 低字节在前 (仪器接收端验证用低字节在前)
     fl = struct.pack(">H", 2 + len(data) + 2)
     return b'\x53\x4E' + fl + ob + data + cb
 
@@ -83,12 +83,12 @@ def respond(mode, parsed, frame_type):
 
     desc_prefix = f"{frame_type}响应"
 
-    if mode == 1:  # 回显
-        return f"{desc_prefix}: 精确回显", parsed["raw"]
-    elif mode == 2:  # POST + 同数据
-        return f"{desc_prefix}: POST+同数据", build(1, parsed["data"])
-    elif mode == 3:  # PUT + 同数据
+    if mode == 1:  # 回显(用低字节CRC重新构建)
+        return f"{desc_prefix}: POST+原始数据(低CRC)", build(1, parsed["data"])
+    elif mode == 2:  # PUT + 同数据
         return f"{desc_prefix}: PUT+同数据", build(2, parsed["data"])
+    elif mode == 3:  # GET + 同数据
+        return f"{desc_prefix}: GET+同数据", build(0, parsed["data"])
     elif mode == 4:  # POST + {fhir:{id:1},url}
         d = json.dumps({"fhir":{"id":"1"},"url":url}, separators=(',',':')).encode()
         return f"{desc_prefix}: POST+fhir{{id}}+url", build(1, d)
@@ -243,13 +243,13 @@ def main():
 
     print("=" * 72)
     print("  三诺 iPOCT 协议 - 自动应答服务器")
-    print("  CRC: CRC16-MODBUS, 高字节在前 (仪器数据验证)")
+    print("  CRC: CRC16-MODBUS (仪器发送:高字节在前, 服务器回复:低字节在前)")
     print("=" * 72)
     print(f"  端口: {port}, 模式: {mode}")
     print("  模式说明:")
     print("    0  = 静默 (只收不发)")
     print("    1  = 精确回显")
-    print("    2  = POST+同数据  3=PUT+同数据  4=POST+fhir{id}+url")
+    print("    2  = PUT+同数据  3=GET+同数据  4=POST+fhir{id}+url")
     print("    5  = PUT+fhir{id}+url  6=POST+url+fhir{}  7=POST+url")
     print("    8  = POST+{}  9=POST空  10=POST+code:0")
     print("    11 = POST+status:0  12=POST+带空格JSON")
