@@ -25,156 +25,213 @@ java.lang.IllegalArgumentException: unitId must not be null
 
 ---
 
-## 根因分析
+## 确定的根因
 
-### 1. 请求路由到哪个 Controller
+### 请求体格式与接口期望的格式完全不匹配
 
-请求 URL 为 `http://192.168.100.69:8280/gw-xtjc/ecg/result`，其中 `gw-xtjc` 是网关前缀，实际路由到服务内部路径为 `/xtjc/ecg/result`。
+#### 接口期望的请求格式（EcgResultVO 的字段定义）
 
-对应的是 **`XtjcEcgController`**（`@RequestMapping("/xtjc/ecg")`），而 **不是** `EcgController`（`@RequestMapping("/ecg")`）。
-
-```java
-// com.yrd.yljk.ggws.cgi.api.xtjc.jyjc.controller.XtjcEcgController
-@PostMapping("/result")
-public boolean ecgResult(@RequestBody EcgResultVO ecgResultVO) {
-    JyjcEcgResult entity = ecgResultVO.toEntity();
-    entity.setStatus(JyjcReportCheckStatus.CHECKED);
-    entity.setUploadStatus(UploadSign.THIRD_SYSTEM);
-    return ecgResultService.saveOrUpdateUploadEcgResult(entity);
-}
-```
-
-### 2. 调用链路梳理
-
-```
-请求进入 XtjcEcgController.ecgResult()
-  → EcgResultVO.toEntity()  // VO 转换为 JyjcEcgResult 实体
-  → ecgResultService.saveOrUpdateUploadEcgResult(entity)  // line 162
-    → save(entity)  // line 78
-      → codeGeneratorService.generateCode(...)  // 生成业务编码，需要 unitId
-        → basePKGeneratorService.getSerialType(unitId, ...)  // line 125
-          → Assert.notNull(unitId, "unitId must not be null")  // 💥 异常抛出
-```
-
-### 3. 核心问题：JyjcEcgResult 实体的 unitId 为 null
-
-在 `JyjcEcgResultServiceImpl.save()` 方法第 78 行调用 `generateCode()` 时，需要传入 `unitId`（机构编号）来生成业务流水号。但此时实体对象的 `unitId` 为 `null`。
-
-**unitId 为 null 的原因**：`EcgResultVO.toEntity()` 转换过程中没有正确填充 `unitId` 字段。
-
-### 4. 请求数据结构分析
-
-请求体的结构为外部 ECG 平台的标准响应格式：
+`EcgResultVO`（`com.yrd.yljk.ggws.cgi.api.xtjc.jyjc.vo`）是一个扁平结构的 VO，期望接收如下格式的 JSON：
 
 ```json
 {
-  "data": {
-    "id": 7151467715662526,
-    "reportBizStatus": 90,
-    "reportStatus": 99003,
-    "patient": { ... },
-    "examination": {
-      "examinationOrgId": 1234567899876551,    // ← 这可能是 unitId 的来源
-      "examinationOrgName": "呼和浩特太平庄乡卫生院",
-      ...
-    },
-    ...
-  },
-  "code": 0,
-  "msg": "",
-  "serverTime": 638609647599748257
+    "unitId": "机构编号",
+    "code": "申请单号",
+    "hisId": "门诊病历/住院号",
+    "hzName": "患者姓名",
+    "hzSex": "患者性别",
+    "hzAge": 79,
+    "ecgBgUrl": "检查报告浏览地址",
+    "ecgBgPath": "检查报告文件(Base64编码)",
+    "ecgBgType": "pdf",
+    "jcdh": "检查单号",
+    "jcks": "检查科室",
+    "jcys": "检查医生",
+    "jcsj": "2024-09-03 09:18:29",
+    "jcdl": "检查导联",
+    "zbHr": "83",
+    "zbXfl": "心房率",
+    "zbXsl": "心室率",
+    "zbPr": "144",
+    "zbQrs": "83",
+    "zbQtQtc": "362/426",
+    "zbPQrsT": "64/42/5",
+    "zbRv5Sv1": "1.29/0.08",
+    "zbXdz": "42",
+    "bgTz": "心电图特征",
+    "bgZd": "窦性心律；室性早搏",
+    "bgKs": "心电图室",
+    "bgYs": "王建",
+    "bgRq": "2024-09-03 09:19:03"
 }
 ```
 
-**关键发现**：请求 JSON 中没有直接名为 `unitId` 的字段。机构信息嵌套在 `data.examination.examinationOrgId` 中。
+#### 实际发送的请求格式
 
-### 5. 可能的具体原因（按可能性排序）
+调用方发送的是外部 ECG 平台的原始响应数据，这是一个深度嵌套的复杂结构：
 
-#### 原因一（最可能）：EcgResultVO 的 toEntity() 方法没有将 examinationOrgId 映射到 unitId
+```json
+{
+    "data": {
+        "id": 7151467715662526,
+        "reportBizStatus": 90,
+        "patient": { "name": "樊良生", "gender": 1, ... },
+        "examination": { "examinationOrgId": 1234567899876551, ... },
+        "acquisitionFiles": [ ... ],
+        "diagnosisResult": { ... }
+    },
+    "code": 0,
+    "msg": "",
+    "serverTime": 638609647599748257
+}
+```
 
-`XtjcEcgController` 使用的 `EcgResultVO`（包路径：`com.yrd.yljk.ggws.cgi.api.xtjc.jyjc.vo.EcgResultVO`）的 `toEntity()` 方法在将 VO 转换为 `JyjcEcgResult` 实体时，可能没有从嵌套的 `examination` 对象中提取 `examinationOrgId` 并映射到实体的 `unitId` 字段。
+#### Jackson 反序列化的实际结果
 
-#### 原因二：请求体结构与 EcgResultVO 不匹配
+当 Spring 的 `@RequestBody` 将上述嵌套 JSON 反序列化到扁平的 `EcgResultVO` 时：
 
-发送的请求体是整个外部平台的响应（包含 `data`、`code`、`msg`、`serverTime` 外层包装），而 `EcgResultVO` 可能只期望接收内层 `data` 部分的内容。如果 VO 的结构与请求体不匹配，Jackson 反序列化时会导致大量字段为 null，包括最终影响 `unitId` 的字段。
+| EcgResultVO 字段 | 请求 JSON 中的对应 | 反序列化结果 |
+|---|---|---|
+| `unitId` | **不存在** | **`null`** ← 直接原因 |
+| `code` | 根级 `"code": 0`（整数） | `"0"` 或 `null`（类型不匹配） |
+| `hzName` | 不存在（在 `data.patient.name` 中） | `null` |
+| `hzSex` | 不存在（在 `data.patient.gender` 中） | `null` |
+| `hzAge` | 不存在（在 `data.patient.age` 中） | `null` |
+| `ecgBgUrl` | 不存在 | `null` |
+| `jcks` | 不存在 | `null` |
+| `jcys` | 不存在 | `null` |
+| `bgZd` | 不存在 | `null` |
+| 所有其他字段 | 不存在 | `null` |
 
-#### 原因三：EcgResultVO 需要显式传入 unitId 字段
+**结论：EcgResultVO 的几乎所有字段都是 null，不仅仅是 `unitId`。**
 
-`EcgResultVO` 可能设计为需要在请求 JSON 中包含一个顶层的 `unitId` 字段（类似于另一个 `EcgController` 的 `EcgResultVO` 可能有 `unitId` 属性），但发送方没有在 JSON 中提供这个字段。
-
----
-
-## 对比两个 Controller 的差异
-
-| 特征 | EcgController | XtjcEcgController |
-|------|---------------|-------------------|
-| 路径 | `/ecg/result` | `/xtjc/ecg/result` |
-| VO 包路径 | `com.yrd.yljk.ggws.cgi.api.ecg.vo.EcgResultVO` | `com.yrd.yljk.ggws.cgi.api.xtjc.jyjc.vo.EcgResultVO` |
-| 转换方式 | `BeanCopyUtils.copy(ecgResultVO, JyjcEcgResult::new)` | `ecgResultVO.toEntity()` |
-| 权限 | 无特殊权限注解 | `@RequestCgiApiPermissions(V1_0, AuthKeyType.his)` |
-
-注意：两个 Controller 使用的是**不同包**下的 `EcgResultVO`，它们的字段定义和转换逻辑可能不同。
-
----
-
-## 建议修复方向
-
-### 方案一：修复 EcgResultVO.toEntity() 映射逻辑
-
-在 `com.yrd.yljk.ggws.cgi.api.xtjc.jyjc.vo.EcgResultVO` 的 `toEntity()` 方法中，确保从请求数据中提取机构 ID 并设置到 `JyjcEcgResult.unitId`：
+#### toEntity() 方法分析
 
 ```java
 public JyjcEcgResult toEntity() {
     JyjcEcgResult entity = new JyjcEcgResult();
-    // ... 其他字段映射 ...
-
-    // 需要确保 unitId 被正确设置
-    // 可能来源于 examination.examinationOrgId
-    if (this.examination != null) {
-        entity.setUnitId(String.valueOf(this.examination.getExaminationOrgId()));
-    }
-
+    BeanUtils.copyProperties(this, entity);  // 将 VO 的属性拷贝到实体
     return entity;
 }
 ```
 
-### 方案二：在 Controller 层补充 unitId
+`BeanUtils.copyProperties` 按同名同类型字段拷贝。由于 `EcgResultVO.unitId` 和 `JyjcEcgResult.unitId` 都是 `String` 类型且同名，拷贝逻辑本身没有问题。**问题在于 VO 中 `unitId` 本身就是 `null`**（因为请求 JSON 中没有这个字段），所以拷贝后实体的 `unitId` 自然也是 `null`。
 
-如果 `toEntity()` 方法不方便修改，可在 Controller 中补充：
+#### 后续报错链路
 
-```java
-@PostMapping("/result")
-public boolean ecgResult(@RequestBody EcgResultVO ecgResultVO) {
-    JyjcEcgResult entity = ecgResultVO.toEntity();
-    entity.setStatus(JyjcReportCheckStatus.CHECKED);
-    entity.setUploadStatus(UploadSign.THIRD_SYSTEM);
-
-    // 补充设置 unitId（如果为空，从 examination 中提取）
-    if (entity.getUnitId() == null && ecgResultVO.getExamination() != null) {
-        entity.setUnitId(String.valueOf(ecgResultVO.getExamination().getExaminationOrgId()));
-    }
-
-    return ecgResultService.saveOrUpdateUploadEcgResult(entity);
-}
 ```
-
-### 方案三：在 Service 层增加 unitId 的兜底逻辑
-
-在 `JyjcEcgResultServiceImpl.saveOrUpdateUploadEcgResult()` 或 `save()` 方法中，在调用 `generateCode()` 之前检查并补充 `unitId`。
+XtjcEcgController.ecgResult(@RequestBody EcgResultVO)
+  ↓ Jackson 反序列化：unitId = null（JSON 中无此字段）
+EcgResultVO.toEntity()
+  ↓ BeanUtils.copyProperties：entity.unitId = null
+ecgResultService.saveOrUpdateUploadEcgResult(entity)  // line 162
+  ↓
+  save(entity)  // line 78
+    ↓
+    generateCode(entity.getUnitId(), ...)  // unitId = null
+      ↓
+      getSerialType(null, ...)  // line 125
+        ↓
+        Assert.notNull(unitId, "unitId must not be null")  // 💥 抛异常
+```
 
 ---
 
-## 排查建议
+## 两个 Controller 对比
 
-1. **确认 EcgResultVO 的完整定义**：查看 `com.yrd.yljk.ggws.cgi.api.xtjc.jyjc.vo.EcgResultVO` 类的源码，确认其字段定义和 `toEntity()` 方法的映射逻辑。
-2. **确认请求体结构是否正确**：对比 `EcgResultVO` 的字段定义与实际发送的 JSON 结构，检查是否存在嵌套层级不匹配的问题。
-3. **确认 unitId 的数据来源**：与部署方确认 `JyjcEcgResult.unitId` 应该从请求的哪个字段映射。
-4. **添加日志**：如可修改代码，在 `toEntity()` 方法和 `saveOrUpdateUploadEcgResult()` 方法入口处打印实体对象的关键字段值，确认数据流转情况。
+| 特征 | EcgController | XtjcEcgController |
+|---|---|---|
+| 路径 | `/ecg/result` | `/xtjc/ecg/result`（本次调用） |
+| VO 包路径 | `com.yrd.yljk.ggws.cgi.api.ecg.vo.EcgResultVO` | `com.yrd.yljk.ggws.cgi.api.xtjc.jyjc.vo.EcgResultVO` |
+| 转换方式 | `BeanCopyUtils.copy(ecgResultVO, JyjcEcgResult::new)` | `ecgResultVO.toEntity()`（BeanUtils.copyProperties） |
+| 权限 | 无特殊权限注解 | `@RequestCgiApiPermissions(V1_0, AuthKeyType.his)` |
+
+两个 Controller 使用的是**不同包**下的 `EcgResultVO`，但根据已确认的源码，`xtjc` 包下的 `EcgResultVO` 也是扁平结构，也有 `unitId` 字段。
+
+---
+
+## 解决方案
+
+### 方案一（推荐，无需改代码）：调用方修改请求体格式
+
+既然无法修改服务端代码，调用方应按照 `EcgResultVO` 期望的扁平结构发送请求。需要在调用前将外部 ECG 平台的嵌套数据转换为 VO 期望的格式。
+
+对照 ECG 平台原始数据 → EcgResultVO 的字段映射：
+
+```
+unitId         ← examination.examinationOrgId（"1234567899876551"）
+code           ← 需要从业务系统获取申请单号（不是外层的 code=0）
+hisId          ← patient.sourceNo 或 patient.admissionId
+hzName         ← patient.name（"樊良生"）
+hzSex          ← patient.gender（"1" → 需转为系统约定的性别编码）
+hzAge          ← patient.age（79）
+ecgBgUrl       ← acquisitionFiles[0].metaData.fileUrl
+ecgBgType      ← 根据文件格式设置（如 "pdf"）
+jcdh           ← 检查单号
+jcks           ← examination.examinationDepartment（"心电图室"）
+jcys           ← examination.examinationDoctorName（"王建"）
+jcsj           ← examination.examinationTime（"2024-09-03 09:18:29"）
+zbHr           ← acquisitionFiles[0].measurements.HR（"83"）
+zbXfl          ← acquisitionFiles[0].measurements.AtrialRate（"83"）
+zbXsl          ← acquisitionFiles[0].measurements.VentricularRate（"83"）
+zbPr           ← acquisitionFiles[0].measurements.PR（"144"）
+zbQrs          ← acquisitionFiles[0].measurements.QRS（"83"）
+zbQtQtc        ← 拼接 QT/QTc（"362/426"）
+zbPQrsT        ← 拼接 P/QRS/T axis（"64/42/5"）
+zbRv5Sv1       ← 拼接 RV5/SV1（"1.29/0.08"）
+zbXdz          ← acquisitionFiles[0].measurements.QRSaxis（"42"）
+bgTz           ← diagnosisResult.diagnosis.diagnosisResult.diagnosisResult.diagnosisDescriptionText
+bgZd           ← diagnosisResult.diagnosis.diagnosisResult.diagnosisResult.diagnosisText（"窦性心律；室性早搏"）
+bgKs           ← examination.examinationDepartment
+bgYs           ← diagnosisResult.diagnosis.diagnosisDoctorName（"王建"）
+bgRq           ← diagnosisResult.diagnosis.diagnosisTime（"2024-09-03 09:19:03"）
+```
+
+正确的请求体示例：
+
+```json
+{
+    "unitId": "1234567899876551",
+    "code": "申请单号（需从业务系统获取）",
+    "hisId": "2409030815000015",
+    "hzName": "樊良生",
+    "hzSex": "1",
+    "hzAge": 79,
+    "ecgBgUrl": "http://111.235.156.203:8004/v1/files/aecg-cloud-default/report/...",
+    "ecgBgType": "7z",
+    "jcks": "呼和浩特市太平庄中心卫生院心电图室",
+    "jcys": "王建",
+    "jcsj": "2024-09-03 09:18:29",
+    "zbHr": "83",
+    "zbXfl": "83",
+    "zbXsl": "83",
+    "zbPr": "144",
+    "zbQrs": "83",
+    "zbQtQtc": "362/426",
+    "zbPQrsT": "64/42/5",
+    "zbRv5Sv1": "1.29/0.08",
+    "zbXdz": "42",
+    "bgZd": "窦性心律；室性早搏",
+    "bgKs": "呼和浩特市太平庄中心卫生院心电图室",
+    "bgYs": "王建",
+    "bgRq": "2024-09-03 09:19:03"
+}
+```
+
+### 方案二（需改代码）：服务端增加数据转换层
+
+如果需要直接接收 ECG 平台的原始格式，需要修改服务端代码：
+1. 新建一个接收外部平台格式的 VO 类
+2. 在 Controller 或 Service 层增加从外部格式到内部 `JyjcEcgResult` 的转换逻辑
+
+### 方案三（需改代码）：在 Service 层增加 unitId 兜底
+
+在 `JyjcEcgResultServiceImpl.saveOrUpdateUploadEcgResult()` 中根据 `code`（申请单号）查询申请单获取 `unitId`。但这不能解决其他字段全为 null 的问题。
 
 ---
 
 ## 总结
 
-**根本原因**：请求通过网关 `/gw-xtjc/ecg/result` 路由到 `XtjcEcgController`，该 Controller 调用 `EcgResultVO.toEntity()` 将请求体转换为 `JyjcEcgResult` 实体对象。在转换过程中，`unitId` 字段没有被正确赋值（值为 null）。随后在保存时，系统需要根据 `unitId` 生成业务编码，因此抛出 `unitId must not be null` 异常。
+**根本原因**：调用方发送的请求体格式（ECG 外部平台的嵌套 JSON 响应）与服务端 `EcgResultVO` 期望的扁平 JSON 格式完全不匹配。Jackson 反序列化时，`EcgResultVO` 的几乎所有字段都为 `null`（包括 `unitId`），导致后续生成业务编码时抛出 `unitId must not be null` 异常。
 
-最可能的原因是 `EcgResultVO.toEntity()` 的映射逻辑中缺少对 `unitId` 的映射，或者请求 JSON 的数据结构与 `EcgResultVO` 的字段定义不匹配（例如外层包装了 `data`/`code`/`msg` 层级）。
+**即使 `unitId` 问题被修复，由于其他字段（`hzName`、`bgZd` 等）也全部为 null，数据也无法正确保存。** 必须按照 `EcgResultVO` 的字段定义重新构造请求体。
