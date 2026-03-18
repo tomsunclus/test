@@ -1,318 +1,282 @@
-#!/usr/bin/env python3
 """
-三诺 iPOCT 协议 - TCP 调试服务器
+三诺 iPOCT 协议 - 自动应答 TCP 服务器
 
-功能:
-  1. 精确捕获仪器发送的每一个字节 (HEX + ASCII)
-  2. 完整解析 SN 协议帧
-  3. 可选自动回复多种响应格式
+已确认:
+  - CRC16-MODBUS, 高字节在前(big-endian) ← 仪器自身数据验证
+  - 仪器连接后先发 Device 注册帧, 再发 Patient/Observation 帧
+  - 仪器使用 GBK 编码
 
 用法:
-  python sinocare_server.py           → 默认9000端口，静默模式(只收不发)
-  python sinocare_server.py 9000 0    → 静默模式: 只接收不回复，观察仪器完整行为
-  python sinocare_server.py 9000 1    → 精确回显模式
-  python sinocare_server.py 9000 99   → 自动逐个尝试所有模式
-
-第一步请用模式0运行，观察仪器的完整发送流程!
+  python sinocare_server.py              → 默认模式(自动回复Device+Patient)
+  python sinocare_server.py 9000 0       → 静默模式
+  python sinocare_server.py 9000 99      → 自动逐个尝试
 """
-
-import socket
-import struct
-import json
-import sys
-import time
-import traceback
+import socket, struct, json, sys, time, traceback
 
 
-def crc16_modbus(data: bytes) -> int:
+def crc16_modbus(data):
     crc = 0xFFFF
-    for byte in data:
-        crc ^= byte
+    for b in data:
+        crc ^= b
         for _ in range(8):
-            if crc & 0x0001:
+            if crc & 1:
                 crc = (crc >> 1) ^ 0xA001
             else:
                 crc >>= 1
     return crc
 
 
-def build_frame(op_type: int, data: bytes) -> bytes:
-    """标准帧: SN + length + op + data + CRC(低字节在前)"""
-    op_bytes = struct.pack(">H", op_type)
-    crc = crc16_modbus(op_bytes + data)
-    crc_bytes = struct.pack("<H", crc)  # 低字节在前 (已确认: 低=E56-D=帧可识别)
-    frame_length = 2 + len(data) + 2
-    return b'\x53\x4E' + struct.pack(">H", frame_length) + op_bytes + data + crc_bytes
+def build(op, data):
+    """构建帧: SN + len + op + data + CRC(高字节在前)"""
+    ob = struct.pack(">H", op)
+    crc = crc16_modbus(ob + data)
+    cb = struct.pack(">H", crc)  # 高字节在前 (仪器实际使用)
+    fl = struct.pack(">H", 2 + len(data) + 2)
+    return b'\x53\x4E' + fl + ob + data + cb
 
 
-def parse_frame(raw: bytes):
-    if len(raw) < 8 or raw[0:2] != b'\x53\x4E':
+def parse(raw):
+    if len(raw) < 8 or raw[:2] != b'\x53\x4E':
         return None
-    frame_length = struct.unpack(">H", raw[2:4])[0]
-    total = 4 + frame_length
+    fl = struct.unpack(">H", raw[2:4])[0]
+    total = 4 + fl
     if len(raw) < total:
         return None
-
-    frame = raw[:total]
-    op_type = struct.unpack(">H", frame[4:6])[0]
-    data_content = frame[6:-2]
-    crc_received = struct.unpack("<H", frame[-2:])[0]  # 低字节在前
-    crc_calc = crc16_modbus(frame[4:-2])
-
-    result = {
-        "raw": frame,
-        "frame_length": frame_length,
-        "op_type": op_type,
-        "data_content": data_content,
-        "crc_received": crc_received,
-        "crc_calc": crc_calc,
-        "crc_ok": crc_received == crc_calc,
-        "total": total,
-    }
+    f = raw[:total]
+    op = struct.unpack(">H", f[4:6])[0]
+    data = f[6:-2]
+    crc_r = struct.unpack(">H", f[-2:])[0]  # 高字节在前
+    crc_c = crc16_modbus(f[4:-2])
+    r = {"raw": f, "fl": fl, "op": op, "data": data,
+         "crc_ok": crc_r == crc_c, "crc_r": crc_r, "crc_c": crc_c, "total": total}
     try:
-        result["json_str"] = data_content.decode('utf-8')
-        result["json_obj"] = json.loads(result["json_str"])
+        r["js"] = data.decode('gbk')  # 仪器使用GBK编码
+        r["jo"] = json.loads(r["js"])
     except:
-        result["json_str"] = None
-        result["json_obj"] = None
-    return result
+        try:
+            r["js"] = data.decode('utf-8', errors='replace')
+            r["jo"] = json.loads(r["js"])
+        except:
+            r["js"] = None
+            r["jo"] = None
+    return r
 
 
-def hex_dump(data: bytes, prefix: str = "    "):
-    """格式化的十六进制dump，类似Wireshark"""
+def hexd(d, pfx="    "):
     lines = []
-    for i in range(0, len(data), 16):
-        chunk = data[i:i+16]
-        hex_part = ' '.join(f'{b:02X}' for b in chunk)
-        ascii_part = ''.join(chr(b) if 32 <= b < 127 else '.' for b in chunk)
-        lines.append(f"{prefix}{i:04X}  {hex_part:<48s}  {ascii_part}")
+    for i in range(0, len(d), 16):
+        c = d[i:i+16]
+        h = ' '.join(f'{b:02X}' for b in c)
+        a = ''.join(chr(b) if 32 <= b < 127 else '.' for b in c)
+        lines.append(f"{pfx}{i:04X}  {h:<48s}  {a}")
     return '\n'.join(lines)
 
 
-def generate_response(mode: int, parsed: dict) -> tuple:
-    """返回 (描述, 响应字节) 或 (描述, b'')"""
-    data = parsed["data_content"]
-    raw = parsed["raw"]
+def respond(mode, parsed, frame_type):
+    """frame_type: 'device', 'patient', 'observation', 'other'"""
     url = ""
-    if parsed["json_obj"]:
-        url = parsed["json_obj"].get("url", "")
+    if parsed["jo"]:
+        url = parsed["jo"].get("url", "")
 
-    modes = {
-        0: ("静默(不回复)", b''),
-        1: ("精确回显(原样返回仪器发来的帧)", raw),
-        2: ("POST + 同样的JSON数据", build_frame(1, data)),
-        3: ("PUT + 同样的JSON数据", build_frame(2, data)),
-        4: ("GET + 同样的JSON数据", build_frame(0, data)),
-        5: ("POST + {fhir:{id:1},url}", build_frame(1,
-            json.dumps({"fhir":{"id":"1"},"url":url}, ensure_ascii=False, separators=(',',':')).encode())),
-        6: ("PUT + {fhir:{id:1},url}", build_frame(2,
-            json.dumps({"fhir":{"id":"1"},"url":url}, ensure_ascii=False, separators=(',',':')).encode())),
-        7: ("POST + {url,fhir:{id:1}}", build_frame(1,
-            json.dumps({"url":url,"fhir":{"id":"1"}}, ensure_ascii=False, separators=(',',':')).encode())),
-        8: ("POST + {fhir:{},url}", build_frame(1,
-            json.dumps({"fhir":{},"url":url}, ensure_ascii=False, separators=(',',':')).encode())),
-        9: ("POST + {url}", build_frame(1,
-            json.dumps({"url":url}, ensure_ascii=False, separators=(',',':')).encode())),
-        10: ("POST + 空JSON {}", build_frame(1, b'{}')),
-        11: ("POST + 空数据", build_frame(1, b'')),
-        12: ("PUT + 空数据", build_frame(2, b'')),
-        13: ("GET + 空数据", build_frame(0, b'')),
-        14: ("POST + {code:0}", build_frame(1, b'{"code":0}')),
-        15: ("POST + {status:0}", build_frame(1, b'{"status":0}')),
-        16: ("POST + 带空格JSON", build_frame(1,
-            json.dumps({"fhir": {"id": "1"}, "url": url}, ensure_ascii=False).encode())),
-    }
+    if mode == 0:
+        return "(静默)", b''
 
-    if mode in modes:
-        return modes[mode]
-    return ("未知模式", b'')
+    desc_prefix = f"{frame_type}响应"
+
+    if mode == 1:  # 回显
+        return f"{desc_prefix}: 精确回显", parsed["raw"]
+    elif mode == 2:  # POST + 同数据
+        return f"{desc_prefix}: POST+同数据", build(1, parsed["data"])
+    elif mode == 3:  # PUT + 同数据
+        return f"{desc_prefix}: PUT+同数据", build(2, parsed["data"])
+    elif mode == 4:  # POST + {fhir:{id:1},url}
+        d = json.dumps({"fhir":{"id":"1"},"url":url}, separators=(',',':')).encode()
+        return f"{desc_prefix}: POST+fhir{{id}}+url", build(1, d)
+    elif mode == 5:  # PUT + {fhir:{id:1},url}
+        d = json.dumps({"fhir":{"id":"1"},"url":url}, separators=(',',':')).encode()
+        return f"{desc_prefix}: PUT+fhir{{id}}+url", build(2, d)
+    elif mode == 6:  # POST + {url,fhir:{}}
+        d = json.dumps({"url":url,"fhir":{}}, separators=(',',':')).encode()
+        return f"{desc_prefix}: POST+url+fhir{{}}", build(1, d)
+    elif mode == 7:  # POST + {url}
+        d = json.dumps({"url":url}, separators=(',',':')).encode()
+        return f"{desc_prefix}: POST+url", build(1, d)
+    elif mode == 8:  # POST + {}
+        return f"{desc_prefix}: POST+{{}}", build(1, b'{}')
+    elif mode == 9:  # POST 空
+        return f"{desc_prefix}: POST空数据", build(1, b'')
+    elif mode == 10:  # POST+{code:0}
+        return f"{desc_prefix}: POST+code:0", build(1, b'{"code":0}')
+    elif mode == 11:  # POST+{status:0}
+        return f"{desc_prefix}: POST+status:0", build(1, b'{"status":0}')
+    elif mode == 12:  # POST + 带空格
+        d = json.dumps({"fhir": {"id": "1"}, "url": url}).encode()
+        return f"{desc_prefix}: POST+带空格JSON", build(1, d)
+    else:
+        return "(无)", b''
 
 
-MAX_MODE = 16
+MAX_MODE = 12
 
 
-def handle_client(conn, addr, mode):
+def handle(conn, addr, mode):
     ts = time.strftime("%H:%M:%S")
     print(f"\n{'='*72}")
-    print(f"[{ts}] 仪器已连接: {addr[0]}:{addr[1]}")
-    if mode == 0:
-        print(f"[{ts}] 模式: 0 = 静默模式(只接收不回复)")
-        print(f"[{ts}] 目的: 观察仪器的完整通信流程")
-    elif mode == 99:
-        print(f"[{ts}] 模式: 99 = 自动逐个尝试 (模式1→{MAX_MODE})")
-    else:
-        desc, _ = generate_response(mode, {"data_content": b'', "raw": b'', "json_obj": {"url": ""}, "json_str": ""})
-        print(f"[{ts}] 模式: {mode} = {desc}")
+    print(f"[{ts}] 仪器连接: {addr[0]}:{addr[1]}")
+    print(f"[{ts}] 模式: {mode}")
     print(f"{'='*72}")
 
     conn.settimeout(300)
-    buffer = b''
-    data_frame_count = 0
-    current_auto_mode = 1
+    buf = b''
+    n = 0
+    auto_mode = 1
 
     try:
         while True:
             try:
                 chunk = conn.recv(4096)
             except socket.timeout:
-                print(f"\n[超时5分钟，断开]")
+                print(f"\n[超时]")
                 break
             if not chunk:
-                print(f"\n[仪器断开连接]")
+                print(f"\n[断开]")
                 break
 
-            ts = time.strftime("%H:%M:%S.") + f"{time.time() % 1:.3f}"[2:]
-            buffer += chunk
-
+            ts = time.strftime("%H:%M:%S")
+            buf += chunk
             print(f"\n[{ts}] ◀ 收到 {len(chunk)} 字节")
-            print(hex_dump(chunk))
 
-            while len(buffer) >= 4:
-                sn_pos = buffer.find(b'\x53\x4E')
-                if sn_pos == -1:
-                    print(f"    (无SN帧头，丢弃 {len(buffer)} 字节)")
-                    buffer = b''
+            while len(buf) >= 4:
+                pos = buf.find(b'\x53\x4E')
+                if pos < 0:
+                    buf = b''
                     break
-                if sn_pos > 0:
-                    print(f"    (跳过 {sn_pos} 字节非帧数据)")
-                    buffer = buffer[sn_pos:]
+                if pos > 0:
+                    buf = buf[pos:]
 
-                if len(buffer) < 4:
+                if len(buf) < 4:
                     break
-                frame_length = struct.unpack(">H", buffer[2:4])[0]
-                total = 4 + frame_length
-                if len(buffer) < total:
-                    print(f"    (等待更多数据: 需要{total}字节, 当前{len(buffer)}字节)")
+                fl = struct.unpack(">H", buf[2:4])[0]
+                total = 4 + fl
+                if len(buf) < total:
                     break
 
-                parsed = parse_frame(buffer[:total])
-                buffer = buffer[total:]
-
-                if not parsed:
+                p = parse(buf[:total])
+                buf = buf[total:]
+                if not p:
                     continue
 
-                op_names = {0:"GET", 1:"POST", 2:"PUT", 3:"DELETE", 8:"心跳"}
-                op_name = op_names.get(parsed["op_type"], f"0x{parsed['op_type']:04X}")
-                crc_s = "✓" if parsed["crc_ok"] else f"✗(期望0x{parsed['crc_calc']:04X})"
+                crc_s = "✓" if p["crc_ok"] else f"✗"
 
-                is_heartbeat = (parsed["json_obj"] and
-                    set(parsed["json_obj"].keys()) <= {"id"} and
-                    parsed["json_obj"].get("id", "") == "")
+                # 识别帧类型
+                frame_type = "unknown"
+                url = ""
+                if p["jo"]:
+                    url = p["jo"].get("url", "")
+                    if "/Device" in url:
+                        frame_type = "device"
+                    elif "/Patient" in url:
+                        frame_type = "patient"
+                    elif "/Observation" in url:
+                        frame_type = "observation"
+                    elif "/qc/" in url:
+                        frame_type = "qc"
+                    elif p["jo"].get("id") is not None and len(p["jo"]) <= 2:
+                        frame_type = "heartbeat"
 
-                if is_heartbeat:
-                    print(f"    ♥ 心跳帧 | op={op_name} CRC={crc_s}")
+                if frame_type == "heartbeat":
+                    print(f"    ♥ 心跳 CRC={crc_s}")
                     continue
 
-                data_frame_count += 1
+                n += 1
                 print(f"\n    {'━'*60}")
-                print(f"    ★ 数据帧 #{data_frame_count}")
-                print(f"    ├ 帧长度: {parsed['frame_length']}")
-                print(f"    ├ 操作类型: {op_name}")
-                print(f"    ├ CRC: 0x{parsed['crc_received']:04X} {crc_s}")
-                print(f"    ├ 数据长度: {len(parsed['data_content'])} 字节")
-
-                if parsed["json_str"]:
-                    print(f"    ├ JSON: {parsed['json_str']}")
-                    if parsed["json_obj"]:
-                        print(f"    ├ JSON格式化:")
-                        for k, v in parsed["json_obj"].items():
-                            if isinstance(v, dict):
-                                print(f"    │   {k}: {json.dumps(v, ensure_ascii=False)}")
-                            else:
-                                print(f"    │   {k}: {v}")
-
-                print(f"    ├ 完整帧HEX:")
-                print(hex_dump(parsed["raw"], "    │   "))
+                print(f"    ★ 帧 #{n} [{frame_type.upper()}]")
+                print(f"    ├ 操作: {p['op']}, 长度: {p['fl']}, CRC: 0x{p['crc_r']:04X} {crc_s}")
+                if url:
+                    print(f"    ├ URL: {url}")
+                if p["js"]:
+                    if len(p["js"]) > 200:
+                        print(f"    ├ JSON: {p['js'][:200]}...")
+                    else:
+                        print(f"    ├ JSON: {p['js']}")
+                print(f"    ├ 完整帧HEX ({len(p['raw'])}字节):")
+                print(hexd(p["raw"]))
                 print(f"    {'━'*60}")
 
-                # 发送响应
+                # 决定响应
                 if mode == 0:
-                    print(f"\n    [静默模式: 不发送响应，继续观察仪器行为...]")
+                    print(f"    [静默: 不回复]")
                     continue
 
                 actual_mode = mode
                 if mode == 99:
-                    actual_mode = current_auto_mode
-                    current_auto_mode += 1
-                    if current_auto_mode > MAX_MODE:
-                        current_auto_mode = 1
+                    actual_mode = auto_mode
+                    auto_mode = (auto_mode % MAX_MODE) + 1
 
-                desc, response = generate_response(actual_mode, parsed)
+                desc, resp = respond(actual_mode, p, frame_type)
 
-                if not response:
-                    print(f"\n    [模式{actual_mode}: {desc}]")
+                if not resp:
+                    print(f"    [{desc}]")
                     continue
 
-                resp_ts = time.strftime("%H:%M:%S.") + f"{time.time() % 1:.3f}"[2:]
-                print(f"\n[{resp_ts}] ▶ 发送响应 [模式{actual_mode}: {desc}]")
-                print(hex_dump(response))
+                rts = time.strftime("%H:%M:%S")
+                print(f"\n[{rts}] ▶ 发送 [模式{actual_mode}: {desc}]")
+                print(hexd(resp))
 
                 try:
-                    conn.sendall(response)
-                    print(f"    发送成功 ({len(response)} 字节)")
+                    conn.sendall(resp)
+                    print(f"    ✓ 已发送 {len(resp)} 字节")
                 except Exception as e:
-                    print(f"    发送失败: {e}")
-
-                print(f"\n    ⏳ 等待仪器下一条消息...")
+                    print(f"    ✗ 发送失败: {e}")
 
     except Exception as e:
         print(f"\n[异常: {e}]")
         traceback.print_exc()
     finally:
         conn.close()
-        print(f"\n[连接关闭, 共收到 {data_frame_count} 个数据帧]")
+        print(f"\n[关闭, 共 {n} 帧]")
 
 
 def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 9000
-    mode = int(sys.argv[2]) if len(sys.argv) > 2 else 0
+    mode = int(sys.argv[2]) if len(sys.argv) > 2 else 99
 
     print("=" * 72)
-    print("  三诺 iPOCT 协议 - TCP 调试服务器")
+    print("  三诺 iPOCT 协议 - 自动应答服务器")
+    print("  CRC: CRC16-MODBUS, 高字节在前 (仪器数据验证)")
     print("=" * 72)
-    print(f"  端口: {port}")
-    print(f"  CRC: CRC16-MODBUS, 低字节在前 (已确认)")
-    print()
-    print("  可用模式:")
-    print("    0  = 静默模式 (只收不发，观察仪器完整行为) ★ 第一步用这个!")
-    print("    1  = 精确回显 (原样返回仪器发来的帧)")
-    print("    2  = POST + 仪器发来的同样JSON")
-    print("    3  = PUT  + 仪器发来的同样JSON")
-    print("    4  = GET  + 仪器发来的同样JSON")
-    print("    5  = POST + {fhir:{id:1},url}")
-    print("    6  = PUT  + {fhir:{id:1},url}")
-    print("    7  = POST + {url,fhir:{id:1}}")
-    print("    8  = POST + {fhir:{},url}")
-    print("    9  = POST + {url}")
-    print("    10 = POST + {}")
-    print("    11 = POST 空数据")
-    print("    12 = PUT  空数据")
-    print("    13 = GET  空数据")
-    print("    14 = POST + {code:0}")
-    print("    15 = POST + {status:0}")
-    print("    16 = POST + 带空格JSON")
-    print("    99 = 自动逐个尝试 (每次换一种)")
-    print()
-    print(f"  当前模式: {mode}")
+    print(f"  端口: {port}, 模式: {mode}")
+    print("  模式说明:")
+    print("    0  = 静默 (只收不发)")
+    print("    1  = 精确回显")
+    print("    2  = POST+同数据  3=PUT+同数据  4=POST+fhir{id}+url")
+    print("    5  = PUT+fhir{id}+url  6=POST+url+fhir{}  7=POST+url")
+    print("    8  = POST+{}  9=POST空  10=POST+code:0")
+    print("    11 = POST+status:0  12=POST+带空格JSON")
+    print("    99 = 自动逐个尝试(每次换一种) ★推荐")
     print("=" * 72)
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind(('0.0.0.0', port))
-    sock.listen(1)
-
-    print(f"\n  ✓ 服务器已启动: 0.0.0.0:{port}")
-    print(f"  → 将仪器的服务器IP设为本机IP，端口设为 {port}")
+    try:
+        sock.bind(('0.0.0.0', port))
+    except OSError as e:
+        print(f"\n  ✗ 端口 {port} 被占用: {e}")
+        print(f"    请关闭 NetAssist 或其他占用程序")
+        input("按回车退出...")
+        return
+    sock.listen(5)
+    print(f"\n  ✓ 监听 0.0.0.0:{port}")
     print(f"  → 等待仪器连接...\n")
 
     try:
         while True:
             conn, addr = sock.accept()
             conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            handle_client(conn, addr, mode)
+            handle(conn, addr, mode)
             print(f"\n  → 等待下一次连接...\n")
     except KeyboardInterrupt:
-        print("\n\n  服务器已停止 (Ctrl+C)")
+        print("\n  已停止")
     finally:
         sock.close()
 
