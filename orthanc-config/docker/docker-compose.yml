@@ -1,0 +1,20 @@
+version: "3.8"
+
+services:
+  orthanc:
+    image: orthancteam/orthanc:24.12.2
+    container_name: orthanc-ohif
+    restart: unless-stopped
+    ports:
+      - "8042:8042"    # HTTP API + OHIF Viewer
+      - "4242:4242"    # DICOM 端口
+    volumes:
+      - orthanc-storage:/var/lib/orthanc/db
+      - ./orthanc.json:/etc/orthanc/orthanc.json:ro
+    environment:
+      - ORTHANC__REGISTERED_USERS={"admin":"StrongPassword_123456"}
+      - VERBOSE_ENABLED=true
+
+volumes:
+  orthanc-storage:
+    driver: local
