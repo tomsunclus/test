@@ -9,15 +9,6 @@ echo   Passive capture, NO impact on services
 echo =========================================
 echo.
 
-net session >nul 2>&1
-if %errorLevel% neq 0 (
-    echo [ERROR] Please run as Administrator!
-    echo         Right-click this file, select "Run as administrator"
-    echo.
-    pause
-    exit /b 1
-)
-
 set SAVE_DIR=%~dp0captures
 if not exist "%SAVE_DIR%" mkdir "%SAVE_DIR%"
 
@@ -38,7 +29,8 @@ if %errorLevel% neq 0 (
     echo   Possible reasons:
     echo   1. Another capture session is already running.
     echo      Run netsh_capture_stop.bat first.
-    echo   2. Insufficient permissions.
+    echo   2. Not running as Administrator.
+    echo      Right-click this file, select "Run as administrator".
     echo.
     pause
     exit /b 1
