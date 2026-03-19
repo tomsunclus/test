@@ -15,6 +15,12 @@ echo    You MUST send test requests from ANOTHER machine,
 echo    not from this server itself.
 echo.
 
+:: Stop any previous session first
+echo [PREP] Stopping any previous capture session...
+netsh trace stop >nul 2>&1
+echo [PREP] Done.
+echo.
+
 set SAVE_DIR=%~dp0captures
 if not exist "%SAVE_DIR%" mkdir "%SAVE_DIR%"
 
@@ -32,11 +38,8 @@ netsh trace start capture=yes tracefile="%SAVE_DIR%\%FILENAME%.etl" maxsize=512 
 if %errorLevel% neq 0 (
     echo.
     echo [ERROR] Failed to start capture!
-    echo   Possible reasons:
-    echo   1. Another capture session is already running.
-    echo      Run netsh_capture_stop.bat first.
-    echo   2. Not running as Administrator.
-    echo      Right-click this file, select "Run as administrator".
+    echo   Please make sure you run as Administrator.
+    echo   Right-click this file, select "Run as administrator".
     echo.
     pause
     exit /b 1
