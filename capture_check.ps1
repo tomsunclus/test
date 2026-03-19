@@ -1,15 +1,16 @@
 <#
 .SYNOPSIS
-    Windows Server 2008 R2 心电系统接口排查工具
+    ECG System - Server Environment Check Tool
+    For Windows Server 2008 R2
 
 .DESCRIPTION
-    在开始抓包前，先用此脚本检查服务器环境：
-    - 端口 8280 是否在监听
-    - 防火墙是否放行
-    - 网络连通性
+    Checks server environment before packet capture:
+    - Is port 8280 listening?
+    - Is Windows Firewall allowing traffic?
+    - What capture tools are available?
 
 .NOTES
-    以管理员身份运行 PowerShell，然后执行：
+    Run as Administrator:
     powershell -ExecutionPolicy Bypass -File capture_check.ps1
 #>
 
@@ -17,17 +18,17 @@ $port = 8280
 $targetIP = "192.168.100.69"
 
 Write-Host "=========================================" -ForegroundColor Cyan
-Write-Host "  心电系统接口环境检查" -ForegroundColor Cyan
-Write-Host "  目标: ${targetIP}:${port}" -ForegroundColor Cyan
+Write-Host "  ECG System - Server Environment Check" -ForegroundColor Cyan
+Write-Host "  Target: ${targetIP}:${port}" -ForegroundColor Cyan
 Write-Host "=========================================" -ForegroundColor Cyan
 Write-Host ""
 
-# 检查1: 端口是否在监听
-Write-Host "[检查1] 端口 $port 监听状态" -ForegroundColor Yellow
+# Check 1: Port listening
+Write-Host "[Check 1] Port $port listening status" -ForegroundColor Yellow
 Write-Host "-----------------------------------------"
 $listeners = netstat -ano | Select-String ":$port "
 if ($listeners) {
-    Write-Host "  [OK] 端口 $port 正在监听:" -ForegroundColor Green
+    Write-Host "  [OK] Port $port is LISTENING:" -ForegroundColor Green
     $listeners | ForEach-Object { Write-Host "  $_" }
 
     $pids = $listeners | ForEach-Object {
@@ -38,62 +39,61 @@ if ($listeners) {
         if ($pid -and $pid -ne "0") {
             $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
             if ($proc) {
-                Write-Host "  进程: PID=$pid  名称=$($proc.ProcessName)  路径=$($proc.Path)" -ForegroundColor Green
+                Write-Host "  Process: PID=$pid  Name=$($proc.ProcessName)  Path=$($proc.Path)" -ForegroundColor Green
             }
         }
     }
 } else {
-    Write-Host "  [警告] 端口 $port 没有服务在监听！" -ForegroundColor Red
-    Write-Host "  请先确认 gw-xtjc 服务是否已启动。" -ForegroundColor Red
+    Write-Host "  [WARN] Port $port is NOT listening!" -ForegroundColor Red
+    Write-Host "  Please check if gw-xtjc service is running." -ForegroundColor Red
 }
 Write-Host ""
 
-# 检查2: 防火墙状态
-Write-Host "[检查2] Windows 防火墙状态" -ForegroundColor Yellow
+# Check 2: Firewall
+Write-Host "[Check 2] Windows Firewall status" -ForegroundColor Yellow
 Write-Host "-----------------------------------------"
 $fwStatus = netsh advfirewall show allprofiles state
 Write-Host $fwStatus
 
 $fwRules = netsh advfirewall firewall show rule name=all dir=in | Select-String -Pattern "$port" -Context 3,0
 if ($fwRules) {
-    Write-Host "  [OK] 找到包含端口 $port 的防火墙规则:" -ForegroundColor Green
+    Write-Host "  [OK] Found firewall rule for port $port :" -ForegroundColor Green
     $fwRules | ForEach-Object { Write-Host "  $_" }
 } else {
-    Write-Host "  [警告] 未找到端口 $port 的入站规则" -ForegroundColor Red
-    Write-Host "  如果防火墙开启，可能需要添加规则:" -ForegroundColor Red
-    Write-Host "  netsh advfirewall firewall add rule name=`"ECG Port 8280`" dir=in action=allow protocol=TCP localport=8280" -ForegroundColor Yellow
+    Write-Host "  [WARN] No inbound rule found for port $port" -ForegroundColor Red
+    Write-Host "  If firewall is ON, you may need to add a rule:" -ForegroundColor Red
+    Write-Host '  netsh advfirewall firewall add rule name="ECG Port 8280" dir=in action=allow protocol=TCP localport=8280' -ForegroundColor Yellow
 }
 Write-Host ""
 
-# 检查3: 当前到 8280 端口的连接
-Write-Host "[检查3] 当前到端口 $port 的活跃连接" -ForegroundColor Yellow
+# Check 3: Active connections
+Write-Host "[Check 3] Active connections on port $port" -ForegroundColor Yellow
 Write-Host "-----------------------------------------"
 $connections = netstat -an | Select-String ":$port " | Select-String -NotMatch "LISTENING"
 if ($connections) {
-    Write-Host "  当前活跃连接:" -ForegroundColor Green
+    Write-Host "  Active connections:" -ForegroundColor Green
     $connections | ForEach-Object { Write-Host "  $_" }
 } else {
-    Write-Host "  当前没有活跃连接" -ForegroundColor Gray
+    Write-Host "  No active connections at this moment" -ForegroundColor Gray
 }
 Write-Host ""
 
-# 检查4: IP 配置
-Write-Host "[检查4] 网卡 IP 配置" -ForegroundColor Yellow
+# Check 4: IP config
+Write-Host "[Check 4] Network adapter IP configuration" -ForegroundColor Yellow
 Write-Host "-----------------------------------------"
-$ipConfig = ipconfig | Select-String -Pattern "IPv4|地址|Address|Ethernet|以太网" -Context 0,1
+$ipConfig = ipconfig | Select-String -Pattern "IPv4|Address|Ethernet"
 $ipConfig | ForEach-Object { Write-Host "  $_" }
 Write-Host ""
 
-# 检查5: 是否有抓包工具
-Write-Host "[检查5] 可用的抓包工具" -ForegroundColor Yellow
+# Check 5: Available capture tools
+Write-Host "[Check 5] Available capture tools" -ForegroundColor Yellow
 Write-Host "-----------------------------------------"
 
-$hasNetsh = $true
-Write-Host "  [OK] netsh trace    - Windows 内置 (推荐)" -ForegroundColor Green
+Write-Host "  [OK] netsh trace    - Windows built-in (RECOMMENDED)" -ForegroundColor Green
 
 $wireshark = Get-Command tshark.exe -ErrorAction SilentlyContinue
 if ($wireshark) {
-    Write-Host "  [OK] Wireshark      - 已安装: $($wireshark.Source)" -ForegroundColor Green
+    Write-Host "  [OK] Wireshark      - Installed: $($wireshark.Source)" -ForegroundColor Green
 } else {
     $wiresharkPaths = @(
         "C:\Program Files\Wireshark\tshark.exe",
@@ -102,37 +102,32 @@ if ($wireshark) {
     $found = $false
     foreach ($p in $wiresharkPaths) {
         if (Test-Path $p) {
-            Write-Host "  [OK] Wireshark      - 已安装: $p" -ForegroundColor Green
+            Write-Host "  [OK] Wireshark      - Installed: $p" -ForegroundColor Green
             $found = $true
             break
         }
     }
     if (-not $found) {
-        Write-Host "  [--] Wireshark      - 未安装 (可选)" -ForegroundColor Gray
+        Write-Host "  [--] Wireshark      - Not installed (optional)" -ForegroundColor Gray
+        Write-Host "       Download: https://www.wireshark.org/download.html" -ForegroundColor Gray
     }
 }
 
 $netmon = Test-Path "C:\Program Files\Microsoft Network Monitor 3\nmcap.exe"
 if ($netmon) {
-    Write-Host "  [OK] Network Monitor - 已安装" -ForegroundColor Green
+    Write-Host "  [OK] Network Monitor - Installed" -ForegroundColor Green
 } else {
-    Write-Host "  [--] Network Monitor - 未安装 (可选)" -ForegroundColor Gray
-}
-
-$rawcap = Test-Path "$PSScriptRoot\RawCap.exe"
-if ($rawcap) {
-    Write-Host "  [OK] RawCap         - 已存在" -ForegroundColor Green
-} else {
-    Write-Host "  [--] RawCap         - 未下载 (可选, 单文件无需安装)" -ForegroundColor Gray
+    Write-Host "  [--] Network Monitor - Not installed (optional, for viewing .etl files)" -ForegroundColor Gray
+    Write-Host "       Download: https://www.microsoft.com/en-us/download/details.aspx?id=4865" -ForegroundColor Gray
 }
 
 Write-Host ""
 Write-Host "=========================================" -ForegroundColor Cyan
-Write-Host "  检查完成" -ForegroundColor Cyan
+Write-Host "  Check Complete" -ForegroundColor Cyan
 Write-Host "=========================================" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "下一步:" -ForegroundColor Yellow
-Write-Host "  1. 如果端口未监听 -> 先启动 gw-xtjc 服务" -ForegroundColor White
-Write-Host "  2. 如果防火墙拦截 -> 添加放行规则" -ForegroundColor White
-Write-Host "  3. 环境正常 -> 运行 netsh_capture_start.bat 开始抓包" -ForegroundColor White
+Write-Host "Next steps:" -ForegroundColor Yellow
+Write-Host "  1. If port not listening -> Start gw-xtjc service first" -ForegroundColor White
+Write-Host "  2. If firewall blocking -> Add allow rule" -ForegroundColor White
+Write-Host "  3. All OK -> Run netsh_capture_start.bat to start capture" -ForegroundColor White
 Write-Host ""
