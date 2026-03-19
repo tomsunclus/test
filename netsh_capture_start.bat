@@ -9,6 +9,12 @@ echo   Passive capture, NO impact on services
 echo =========================================
 echo.
 
+echo !! IMPORTANT !!
+echo    netsh trace CANNOT capture localhost/127.0.0.1 traffic.
+echo    You MUST send test requests from ANOTHER machine,
+echo    not from this server itself.
+echo.
+
 set SAVE_DIR=%~dp0captures
 if not exist "%SAVE_DIR%" mkdir "%SAVE_DIR%"
 
@@ -17,11 +23,11 @@ for /f "tokens=1-2 delims=: " %%a in ('time /t') do set TIMESTR=%%a%%b
 set FILENAME=ecg_capture_%DATESTR%_%TIMESTR%
 
 echo [INFO] Capture file: %SAVE_DIR%\%FILENAME%.etl
-echo [INFO] Capturing TCP traffic on port 8280
+echo [INFO] Capturing ALL network traffic (no filter)
 echo.
 
 echo [START] Starting capture...
-netsh trace start capture=yes tracefile="%SAVE_DIR%\%FILENAME%.etl" protocol=TCP IPv4.Address=192.168.100.69 maxsize=512 overwrite=yes
+netsh trace start capture=yes tracefile="%SAVE_DIR%\%FILENAME%.etl" maxsize=512 overwrite=yes
 
 if %errorLevel% neq 0 (
     echo.
@@ -41,12 +47,12 @@ echo =========================================
 echo   Capture is RUNNING!
 echo =========================================
 echo.
-echo   You can now ask the ECG system to send
-echo   test data. The capture runs in background
-echo   and does NOT affect any running services.
+echo   Now send test requests from ANOTHER PC:
+echo     - Use Postman on your own PC (not this server)
+echo     - POST to http://192.168.100.69:8280/gw-xtjc/ecg/result
+echo     - Or ask the ECG vendor to send test data
 echo.
-echo   When done, press any key here to stop,
-echo   or run netsh_capture_stop.bat separately.
+echo   Press any key to STOP capture when done.
 echo.
 echo =========================================
 pause
@@ -64,6 +70,7 @@ echo.
 echo   How to view:
 echo     1. Open .etl file with Microsoft Network Monitor 3.4
 echo        Download: https://www.microsoft.com/en-us/download/details.aspx?id=4865
+echo        Filter in Network Monitor: TCP.Port == 8280
 echo     2. Or use Microsoft Message Analyzer
 echo     3. Or install Wireshark and use wireshark_capture.bat
 echo =========================================
