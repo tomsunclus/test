@@ -1,24 +1,19 @@
 {
   "Name": "Orthanc-Aliyun",
-
-  "StorageDirectory": "/var/lib/orthanc/db",
+  "StorageDirectory": "/var/lib/orthanc/storage",
   "IndexDirectory": "/var/lib/orthanc/db",
-
-  "HttpServerEnabled": true,
-  "HttpPort": 8042,
-
-  "DicomServerEnabled": true,
-  "DicomAet": "ORTHANC",
-  "DicomPort": 4242,
-
-  "DicomCheckCalledAet": false,
-
   "RemoteAccessAllowed": true,
   "AuthenticationEnabled": true,
   "RegisteredUsers": {
-    "orthanc": "orthanc"
+    "admin": "StrongPassword_123456"
   },
+  "DicomAet": "ORTHANC",
+  "DicomPort": 4242,
+  "HttpPort": 8042,
+  "HttpCompressionEnabled": true,
+  "OrthancExplorerEnabled": true,
 
+  "DicomCheckCalledAet": false,
   "DicomAlwaysAllowEcho": true,
   "DicomAlwaysAllowFind": true,
   "DicomAlwaysAllowFindWorklist": true,
@@ -26,34 +21,35 @@
   "DicomAlwaysAllowMove": true,
   "DicomAlwaysAllowStore": true,
 
-  "DicomModalities": {
-    "microdicom": {
-      "AET": "MICRODICOM",
-      "Host": "0.0.0.0",
-      "Port": 11112,
-      "AllowEcho": true,
-      "AllowFind": true,
-      "AllowFindWorklist": true,
-      "AllowGet": true,
-      "AllowMove": true,
-      "AllowStore": true,
-      "AllowTranscoding": true
-    }
+  "OrthancExplorer2": {
+    "Enable": true,
+    "IsDefaultOrthancUI": true
   },
-
-  "Plugins": [
-    "/usr/share/orthanc/plugins/libModalityWorklists.so"
-  ],
 
   "Worklists": {
     "Enable": true,
-    "Database": "/opt/orthanc/worklists",
+    "Database": "/var/lib/orthanc/worklists",
     "FilterIssuerAet": false
   },
 
-  "StableAge": 60,
-  "DicomScuTimeout": 10,
-  "DicomScuPreferredTransferSyntax": "1.2.840.10008.1.2.1",
+  "DicomWeb": {
+    "Enable": true,
+    "Root": "/dicom-web/",
+    "EnableWado": true,
+    "WadoRoot": "/wado",
+    "Ssl": false,
+    "StudiesMetadata": "Full",
+    "SeriesMetadata": "Full",
+    "Threads": 4
+  },
 
-  "HttpsCACertificates": "/etc/ssl/certs/ca-certificates.crt"
+  "OHIF": {
+    "DataSource": "dicom-web",
+    "RouterBasename": "/ohif/"
+  },
+
+  "DicomModalities": {
+    "DR01": ["DR01", "192.168.1.29", 11112],
+    "MICRODICOM": ["MICRODICOM", "192.168.1.29", 11112]
+  }
 }
