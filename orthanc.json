@@ -30,7 +30,7 @@
     "microdicom": {
       "AET": "MICRODICOM",
       "Host": "0.0.0.0",
-      "Port": 104,
+      "Port": 11112,
       "AllowEcho": true,
       "AllowFind": true,
       "AllowFindWorklist": true,
@@ -39,6 +39,16 @@
       "AllowStore": true,
       "AllowTranscoding": true
     }
+  },
+
+  "Plugins": [
+    "/usr/share/orthanc/plugins/libModalityWorklists.so"
+  ],
+
+  "Worklists": {
+    "Enable": true,
+    "Database": "/opt/orthanc/worklists",
+    "FilterIssuerAet": false
   },
 
   "StableAge": 60,
