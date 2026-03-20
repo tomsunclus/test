@@ -54,17 +54,90 @@ MicroDicom 只能做第 4 步的反向操作（从 PACS 下载影像），不能
   - ✅ MPPS（检查状态上报）
   - ✅ C-ECHO 验证
 
-**操作步骤：**
+#### DVTk Modality Emulator 详细操作步骤
 
-1. 下载并安装 DVTk Modality Emulator
-   - 下载地址: https://www.dvtk.org/dicom/modality-emulator/
-2. 配置远程 DICOM 节点：
-   - Remote AE Title: `ORTHANC`
-   - Remote IP: `39.104.226.62`
-   - Remote Port: `4242`
-   - Local AE Title: `DR01`（与 Orthanc 中 DicomModalities 配置一致）
+##### 第一步：启动软件
+
+安装完成后，打开 `Modality Emulator.exe`。软件主界面有多个选项卡，主要关注：
+- **Configuration** — 配置本地和远程连接信息
+- **Worklist** — 查询 Worklist 申请单
+- **Storage** — 上传影像到 PACS
+- **MPPS** — 检查状态上报
+
+##### 第二步：配置 Emulator（Configuration 选项卡）
+
+点击 **Configuration** 选项卡，配置以下信息：
+
+**1) Emulator（本地 / SCU）配置：**
+
+| 参数 | 值 | 说明 |
+|------|------|------|
+| **AE Title** | `DR01` | 本地设备的 AE Title，需与 Orthanc `DicomModalities` 中配置的一致 |
+| **Port** | `11112` | 本地监听端口 |
+
+**2) Remote System（远程 Orthanc 服务器 / SCP）配置：**
+
+| 参数 | 值 | 说明 |
+|------|------|------|
+| **AE Title** | `ORTHANC` | Orthanc 的 AE Title |
+| **IP Address** | `39.104.226.62` | 阿里云 ECS 公网 IP |
+| **Port** | `4242` | Orthanc 的 DICOM 端口 |
+
+> 你的 Orthanc `DicomModalities` 中已经配置了 `"DR01": ["DR01", "192.168.1.29", 11112]`，
+> 所以本地 AE Title 建议使用 `DR01` 保持一致。
+
+##### 第三步：测试连接（Ping / Echo）
+
+1. 在 **Configuration** 或主界面找到 **Ping** 或 **DICOM Verification (C-ECHO)** 按钮
+2. 点击后，如果显示 **Success** / **Passed**，说明网络连通且 AE Title 匹配
+
+##### 第四步：查询 Worklist 申请单（核心操作）
+
+1. 点击 **Worklist** 选项卡
+2. 配置查询参数（可选，留空查全部）：
+   - **Scheduled Date** — 可设置日期范围过滤
+   - **Modality** — 可选 `DR`、`CR`、`DX` 等
+   - **Scheduled Station AE Title** — 可留空或设为 `DR01`
 3. 点击 **Query Worklist** 按钮
-4. 即可看到 Orthanc 上的申请单列表
+4. 下方列表会显示从 Orthanc 查到的申请单信息：
+   - **Patient Name** — 患者姓名
+   - **Patient ID** — 患者 ID
+   - **Accession Number** — 申请号（对应你 `.wl` 文件名中的 ACC 号）
+   - **Scheduled Date/Time** — 预约日期时间
+   - **Modality** — 检查设备类型
+   - **Procedure Description** — 检查描述
+   - **Referring Physician** — 申请医生
+
+> 如果查询结果为空，请先按照本文档第三节排查 Orthanc 服务器端的配置。
+
+##### 第五步：模拟拍片并上传影像（可选）
+
+查询到 Worklist 后，可以继续模拟完整的 DR 设备工作流：
+
+1. 在 Worklist 查询结果中**选择一条申请单**
+2. 点击 **Storage** 选项卡
+3. 选择一个本地 DICOM 文件作为"拍摄的影像"（或使用 DVTk 自带的测试文件）
+4. 点击 **Store** 按钮，将影像通过 C-STORE 上传到 Orthanc
+5. 上传后在 Orthanc Web 界面 `http://39.104.226.62:8042` 可以看到新增的影像
+
+##### 第六步：查看结果
+
+操作完成后，主界面底部的 **Results** / **Activity Logging** 区域会显示详细的 DICOM 通信日志，包括：
+- C-FIND Request/Response（Worklist 查询请求和响应）
+- 返回的 DICOM 数据集内容
+- 通信状态（Success / Failure）
+
+如果有错误，可以从日志中看到具体的失败原因。
+
+##### 常见问题
+
+| 问题 | 解决方案 |
+|------|----------|
+| Ping/Echo 失败 | 检查 IP、端口、AE Title 是否正确；检查阿里云安全组是否放行 4242 端口 |
+| Query Worklist 返回空 | 1. 检查 Orthanc 的 Worklist 插件配置（`Database` vs `Directory`）<br>2. 检查 Docker Volume 映射是否正确<br>3. 检查 `.wl` 文件是否在容器内可见 |
+| 提示 "Association Rejected" | AE Title 不匹配，确保 DVTk 的本地 AE Title 在 Orthanc 的 `DicomModalities` 中已配置 |
+| 提示 "Connection Refused" | Orthanc 服务未运行，或端口/IP 不正确 |
+| 查到 Worklist 但字段为空 | `.wl` 文件生成时缺少必要的 DICOM Tag，检查 Java 后端生成逻辑 |
 
 ### 方案二：Miele-WL Worklist Client
 
