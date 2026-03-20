@@ -5,21 +5,13 @@
   "RemoteAccessAllowed": true,
   "AuthenticationEnabled": true,
   "RegisteredUsers": {
-    "admin": "StrongPassword_123456"
+    "admin": "your_password"
   },
   "DicomAet": "ORTHANC",
   "DicomPort": 4242,
   "HttpPort": 8042,
   "HttpCompressionEnabled": true,
   "OrthancExplorerEnabled": true,
-
-  "DicomCheckCalledAet": false,
-  "DicomAlwaysAllowEcho": true,
-  "DicomAlwaysAllowFind": true,
-  "DicomAlwaysAllowFindWorklist": true,
-  "DicomAlwaysAllowGet": true,
-  "DicomAlwaysAllowMove": true,
-  "DicomAlwaysAllowStore": true,
 
   "OrthancExplorer2": {
     "Enable": true,
@@ -51,5 +43,12 @@
   "DicomModalities": {
     "DR01": ["DR01", "192.168.1.29", 11112],
     "MICRODICOM": ["MICRODICOM", "192.168.1.29", 11112]
-  }
+  },
+
+  "DicomAlwaysAllowEcho": true,
+  "DicomAlwaysAllowFind": true,
+  "DicomAlwaysAllowFindWorklist": true,
+  "DicomAlwaysAllowStore": true,
+  "DicomAlwaysAllowGet": true,
+  "DicomAlwaysAllowMove": true
 }
