@@ -1,0 +1,15 @@
+services:
+  orthanc:
+    image: orthancteam/orthanc:latest
+    container_name: orthanc
+    restart: unless-stopped
+    ports:
+      - "8042:8042"
+      - "4242:4242"
+    volumes:
+      - ./data:/var/lib/orthanc
+      - ./config/orthanc.json:/etc/orthanc/orthanc.json:ro
+    environment:
+      - OHIF_PLUGIN_ENABLED=true
+      - DICOM_WEB_PLUGIN_ENABLED=true
+      - WORKLISTS_PLUGIN_ENABLED=true

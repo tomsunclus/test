@@ -1,0 +1,54 @@
+{
+  "Name": "Orthanc-Aliyun",
+  "StorageDirectory": "/var/lib/orthanc/storage",
+  "IndexDirectory": "/var/lib/orthanc/db",
+  "RemoteAccessAllowed": true,
+  "AuthenticationEnabled": true,
+  "RegisteredUsers": {
+    "admin": "your_password"
+  },
+  "DicomAet": "ORTHANC",
+  "DicomPort": 4242,
+  "HttpPort": 8042,
+  "HttpCompressionEnabled": true,
+  "OrthancExplorerEnabled": true,
+
+  "OrthancExplorer2": {
+    "Enable": true,
+    "IsDefaultOrthancUI": true
+  },
+
+  "Worklists": {
+    "Enable": true,
+    "Database": "/var/lib/orthanc/worklists",
+    "FilterIssuerAet": false
+  },
+
+  "DicomWeb": {
+    "Enable": true,
+    "Root": "/dicom-web/",
+    "EnableWado": true,
+    "WadoRoot": "/wado",
+    "Ssl": false,
+    "StudiesMetadata": "Full",
+    "SeriesMetadata": "Full",
+    "Threads": 4
+  },
+
+  "OHIF": {
+    "DataSource": "dicom-web",
+    "RouterBasename": "/ohif/"
+  },
+
+  "DicomModalities": {
+    "DR01": ["DR01", "192.168.1.29", 11112],
+    "MICRODICOM": ["MICRODICOM", "192.168.1.29", 11112]
+  },
+
+  "DicomAlwaysAllowEcho": true,
+  "DicomAlwaysAllowFind": true,
+  "DicomAlwaysAllowFindWorklist": true,
+  "DicomAlwaysAllowStore": true,
+  "DicomAlwaysAllowGet": true,
+  "DicomAlwaysAllowMove": true
+}
