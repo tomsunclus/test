@@ -1,0 +1,49 @@
+{
+  "Name": "Orthanc-Aliyun",
+
+  "StorageDirectory": "/var/lib/orthanc/db",
+  "IndexDirectory": "/var/lib/orthanc/db",
+
+  "HttpServerEnabled": true,
+  "HttpPort": 8042,
+
+  "DicomServerEnabled": true,
+  "DicomAet": "ORTHANC",
+  "DicomPort": 4242,
+
+  "DicomCheckCalledAet": false,
+
+  "RemoteAccessAllowed": true,
+  "AuthenticationEnabled": true,
+  "RegisteredUsers": {
+    "orthanc": "orthanc"
+  },
+
+  "DicomAlwaysAllowEcho": true,
+  "DicomAlwaysAllowFind": true,
+  "DicomAlwaysAllowFindWorklist": true,
+  "DicomAlwaysAllowGet": true,
+  "DicomAlwaysAllowMove": true,
+  "DicomAlwaysAllowStore": true,
+
+  "DicomModalities": {
+    "microdicom": {
+      "AET": "MICRODICOM",
+      "Host": "0.0.0.0",
+      "Port": 104,
+      "AllowEcho": true,
+      "AllowFind": true,
+      "AllowFindWorklist": true,
+      "AllowGet": true,
+      "AllowMove": true,
+      "AllowStore": true,
+      "AllowTranscoding": true
+    }
+  },
+
+  "StableAge": 60,
+  "DicomScuTimeout": 10,
+  "DicomScuPreferredTransferSyntax": "1.2.840.10008.1.2.1",
+
+  "HttpsCACertificates": "/etc/ssl/certs/ca-certificates.crt"
+}
